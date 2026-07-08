@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic
+prometheus-client
+requests
+torch
+transformers
+accelerate
