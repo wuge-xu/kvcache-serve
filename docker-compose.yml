@@ -1,0 +1,36 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: kvcache-redis
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kvcache-api
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KVCACHE_MODEL=sshleifer/tiny-gpt2
+      - MAX_NEW_TOKENS=64
+    ports:
+      - "18000:18000"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kvcache-worker
+    command: ["python", "-m", "app.worker"]
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KVCACHE_MODEL=sshleifer/tiny-gpt2
+      - MAX_NEW_TOKENS=64
+    depends_on:
+      - redis
+    restart: unless-stopped

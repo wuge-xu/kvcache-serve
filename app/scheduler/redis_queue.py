@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -22,7 +23,10 @@ class QueueTask:
 
 
 class RedisQueue:
-    def __init__(self, host: str = "localhost", port: int = 6379):
+    def __init__(self, host: str | None = None, port: int | None = None):
+        host = host or os.getenv("REDIS_HOST", "localhost")
+        port = port or int(os.getenv("REDIS_PORT", "6379"))
+
         self.client = redis.Redis(
             host=host,
             port=port,
