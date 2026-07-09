@@ -90,3 +90,79 @@ Open report from WSL:
 ## Why This Project
 
 KV Cache is a key component in autoregressive Transformer inference. As context length grows, KV Cache memory grows with cached tokens. This project provides a service-level platform to observe, benchmark, and later optimize KV Cache behavior.
+
+## Docker Compose Deployment
+
+KVCache-Serve supports Docker Compose deployment.
+
+The Compose stack includes:
+
+- kvcache-api: FastAPI API server
+- kvcache-worker: inference worker
+- kvcache-redis: Redis queue and result store
+- kvcache-prometheus: metrics collector
+- kvcache-grafana: dashboard visualization
+
+Start the full stack:
+
+    docker compose up -d --build
+
+Check running containers:
+
+    docker compose ps
+
+Stop the stack:
+
+    docker compose down
+
+Service ports:
+
+- API: http://localhost:18000
+- Prometheus: http://localhost:9090
+- Grafana: http://localhost:3001
+
+## Observability
+
+The API service exposes Prometheus metrics at:
+
+    http://localhost:18000/metrics
+
+Prometheus scrapes the API service through Docker Compose internal networking:
+
+    api:18000/metrics
+
+Grafana is automatically provisioned with:
+
+- Prometheus datasource
+- KVCache-Serve Overview dashboard
+
+The dashboard includes:
+
+- LLM request count
+- request rate
+- average request latency
+- TTFT
+- inter-token latency
+- generated tokens
+- KV Cache tokens
+- KV Cache memory
+
+## Async Queue API
+
+KVCache-Serve supports asynchronous inference through Redis Queue.
+
+Submit a job:
+
+    curl -X POST "http://localhost:18000/queue/chat" -H "Content-Type: application/json" -d '{"prompt":"Hello, explain KV cache briefly.","model":"local-llm","max_tokens":32}'
+
+Check queue health:
+
+    curl http://localhost:18000/queue/health
+
+Check job status:
+
+    curl http://localhost:18000/queue/status/{job_id}
+
+Get job result:
+
+    curl http://localhost:18000/queue/result/{job_id}
