@@ -32,3 +32,6 @@ models/
 # Env files
 .env
 .env.*
+
+# Benchmark generated results
+benchmark/results/

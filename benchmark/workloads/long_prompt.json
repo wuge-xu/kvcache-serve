@@ -1,0 +1,8 @@
+{
+  "name": "long_prompt",
+  "prompts": [
+    "Explain KV cache in transformer inference. Please include prefill stage, decode stage, past key values, memory usage, and why long context increases memory cost. Also explain why serving systems need to monitor TTFT, ITL, throughput, and cache memory.",
+    "In a large language model inference service, multiple requests may arrive at the same time. Explain how request scheduling, batching, KV cache management, and observability affect latency and throughput. Please discuss the role of Prometheus metrics and runtime status.",
+    "KV cache is widely used in autoregressive transformer inference. Explain how key and value tensors are stored for each layer, why the cache grows with sequence length, and why long-context serving systems need memory estimation, benchmark reports, and runtime monitoring."
+  ]
+}

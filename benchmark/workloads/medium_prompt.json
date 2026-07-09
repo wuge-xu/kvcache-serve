@@ -1,0 +1,8 @@
+{
+  "name": "medium_prompt",
+  "prompts": [
+    "Explain KV cache in transformer inference. Please include prefill stage, decode stage, past key values, and memory usage.",
+    "Describe why KV cache can improve autoregressive text generation performance in transformer models.",
+    "Explain the difference between prefill latency, decode latency, TTFT, and inter-token latency in LLM serving."
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "short_prompt",
+  "prompts": [
+    "Hello, explain KV cache briefly.",
+    "What is prefill in LLM inference?",
+    "What is decode stage in transformer inference?"
+  ]
+}
