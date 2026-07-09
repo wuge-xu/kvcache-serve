@@ -1,21 +1,76 @@
-# KVCache-Serve
+# KVCache-Serve：面向 KV Cache 观测的大模型推理服务平台
 
-KVCache-Serve is an experimental LLM inference serving platform focused on KV Cache runtime observability, benchmark evaluation, and future KV Cache management strategies.
+KVCache-Serve 是一个面向大模型推理服务的个人工程项目，重点关注 KV Cache 的运行时观测、推理延迟指标、异步任务队列、Benchmark 测试以及 Prometheus / Grafana 可观测性。
 
-## Features
+这个项目不是单独的算法小 demo，而是一个完整的服务系统。当前已经包含 FastAPI API 服务、本地 Transformers 推理后端、Redis Queue、Inference Worker、Prometheus 指标采集、Grafana Dashboard、Benchmark Runner 和 HTML 报告生成。
 
-- FastAPI inference service
-- Local Hugging Face Transformers backend
-- Mock backend for service testing
-- Manual Prefill / Decode loop
-- TTFT and ITL measurement
-- KV Cache token and memory estimation
-- Runtime status endpoint
-- Prometheus metrics endpoint
-- Benchmark runner
-- HTML benchmark report
+## 一、项目目标
 
-## Current Architecture
+本项目主要用于学习和实践 LLM Serving / AI Infra / SRE 相关能力。
+
+核心目标包括：
+
+- 搭建一个可运行的大模型推理 API 服务
+- 将推理过程拆分为 Prefill 和 Decode 阶段
+- 统计 TTFT、ITL、吞吐量、请求延迟等推理指标
+- 估算 KV Cache tokens 和 KV Cache memory
+- 使用 Redis Queue 实现异步推理任务队列
+- 使用 Worker 独立消费任务并执行模型推理
+- 使用 Prometheus 采集服务指标
+- 使用 Grafana 展示推理服务和 KV Cache 指标
+- 使用 Benchmark 脚本生成测试数据和 HTML 报告
+- 后续扩展到 Kubernetes 部署和 KV Cache 策略实验
+
+## 二、当前功能
+
+### 1. API 服务
+
+当前支持以下接口：
+
+- GET /health：健康检查
+- POST /chat：同步推理接口
+- GET /metrics：Prometheus 指标接口
+- GET /runtime/status：KV Cache Runtime 状态接口
+- POST /queue/chat：异步推理任务提交
+- GET /queue/status/{job_id}：查询任务状态
+- GET /queue/result/{job_id}：查询任务结果
+- GET /queue/health：Redis Queue 健康检查
+
+### 2. 推理后端
+
+当前支持：
+
+- MockBackend：用于快速测试服务链路
+- TransformersBackend：基于 Hugging Face Transformers 的本地推理后端
+
+当前默认模型：
+
+- sshleifer/tiny-gpt2
+
+说明：tiny-gpt2 生成质量较差，经常重复 stairs / factors，这属于正常现象。当前模型主要用于验证推理链路、KV Cache 指标和服务架构。
+
+### 3. Prefill / Decode 指标
+
+项目手动拆分了 Transformer 推理过程：
+
+- Prefill：处理完整 prompt，生成 past_key_values
+- Decode：逐 token 生成，并复用 past_key_values
+
+当前统计指标：
+
+- latency_ms：总延迟
+- prefill_ms：Prefill 阶段延迟
+- decode_ms：Decode 阶段延迟
+- ttft_ms：Time To First Token
+- avg_itl_ms：平均 Inter-Token Latency
+- tokens_per_second：生成吞吐
+- kv_cache_tokens：KV Cache 中缓存的 token 数
+- kv_cache_memory_bytes：KV Cache 估算内存
+- kv_cache_memory_mb：KV Cache 估算内存 MB
+
+### 4. Redis Queue + Worker
+
+项目已经支持异步推理架构：
 
 Client
   |
@@ -23,146 +78,199 @@ Client
 FastAPI API Server
   |
   v
-Inference Backend
+Redis Queue
+  |
+  v
+Inference Worker
   |
   v
 Transformers Backend
   |
   v
-Prefill / Decode
+Result Store in Redis
+
+API 层只负责接收请求和写入队列，Worker 独立消费任务并执行模型推理。这样可以将 API 服务和推理执行解耦，后续可以扩展多个 Worker、限流、队列监控和 Kubernetes 部署。
+
+### 5. Prometheus + Grafana
+
+项目支持 Docker Compose 一键启动可观测性组件：
+
+- Prometheus：采集 API 服务暴露的 /metrics
+- Grafana：展示 KVCache-Serve Dashboard
+
+Grafana 当前端口：
+
+- http://localhost:3001
+
+Prometheus 当前端口：
+
+- http://localhost:9090
+
+API 当前端口：
+
+- http://localhost:18000
+
+Grafana Dashboard 包含：
+
+- LLM 请求数
+- 请求速率
+- 平均请求延迟
+- TTFT
+- ITL
+- Generated Tokens
+- KV Cache Tokens
+- KV Cache Memory
+
+## 三、项目架构
+
+整体架构如下：
+
+Client / curl / Benchmark
   |
   v
-KV Cache Estimator
+FastAPI API Server
   |
-  v
-KV Cache Runtime
+  +--> Sync Chat API
   |
-  v
-Prometheus Metrics + Benchmark Report
+  +--> Redis Queue API
+             |
+             v
+        Redis Queue
+             |
+             v
+      Inference Worker
+             |
+             v
+     Transformers Backend
+             |
+             v
+      Prefill / Decode
+             |
+             v
+      KV Cache Estimator
+             |
+             v
+      KV Cache Runtime
+             |
+             v
+Prometheus Metrics + Grafana Dashboard
 
-## Quick Start
+## 四、Docker Compose 部署
 
-Activate virtual environment:
+项目支持 Docker Compose 一键启动。
 
-    source .venv/bin/activate
+包含组件：
 
-Start service:
+- kvcache-api
+- kvcache-worker
+- kvcache-redis
+- kvcache-prometheus
+- kvcache-grafana
 
-    uvicorn app.main:app --host 0.0.0.0 --port 18000 --reload
-
-Health check:
-
-    curl http://localhost:18000/health
-
-Chat API:
-
-    curl -X POST "http://localhost:18000/chat" -H "Content-Type: application/json" -d '{"prompt":"Hello, explain KV cache briefly.","model":"local-llm","max_tokens":32}' | python3 -m json.tool
-
-Runtime status:
-
-    curl http://localhost:18000/runtime/status | python3 -m json.tool
-
-Run benchmark:
-
-    python benchmark/run_benchmark.py --workload benchmark/workloads/short_prompt.json --repeat 2 --concurrency 1 --max-tokens 32
-
-Generate HTML report:
-
-    python benchmark/report_generator.py
-
-Open report from WSL:
-
-    explorer.exe "$(wslpath -w benchmark/results/benchmark_report.html)"
-
-## Development Status
-
-- V0.1 FastAPI service skeleton: Done
-- V0.2 Local Transformers inference: Done
-- V0.3 Prefill / Decode metrics: Done
-- V0.4 Inference Backend + KV Cache Runtime: Done
-- V0.5 Benchmark runner: Done
-- V0.6 HTML benchmark report: Done
-- V0.7 Documentation: Current
-- V0.8 Redis queue and worker separation: Planned
-- V0.9 Docker Compose: Planned
-- V1.0 Kubernetes deployment: Planned
-
-## Why This Project
-
-KV Cache is a key component in autoregressive Transformer inference. As context length grows, KV Cache memory grows with cached tokens. This project provides a service-level platform to observe, benchmark, and later optimize KV Cache behavior.
-
-## Docker Compose Deployment
-
-KVCache-Serve supports Docker Compose deployment.
-
-The Compose stack includes:
-
-- kvcache-api: FastAPI API server
-- kvcache-worker: inference worker
-- kvcache-redis: Redis queue and result store
-- kvcache-prometheus: metrics collector
-- kvcache-grafana: dashboard visualization
-
-Start the full stack:
+启动：
 
     docker compose up -d --build
 
-Check running containers:
+查看容器：
 
     docker compose ps
 
-Stop the stack:
+停止：
 
     docker compose down
 
-Service ports:
+服务地址：
 
 - API: http://localhost:18000
 - Prometheus: http://localhost:9090
 - Grafana: http://localhost:3001
 
-## Observability
+## 五、快速测试
 
-The API service exposes Prometheus metrics at:
+健康检查：
 
-    http://localhost:18000/metrics
+    curl http://localhost:18000/health
 
-Prometheus scrapes the API service through Docker Compose internal networking:
+同步推理：
 
-    api:18000/metrics
+    curl -X POST "http://localhost:18000/chat" -H "Content-Type: application/json" -d '{"prompt":"Hello, explain KV cache briefly.","model":"local-llm","max_tokens":32}' | python3 -m json.tool
 
-Grafana is automatically provisioned with:
-
-- Prometheus datasource
-- KVCache-Serve Overview dashboard
-
-The dashboard includes:
-
-- LLM request count
-- request rate
-- average request latency
-- TTFT
-- inter-token latency
-- generated tokens
-- KV Cache tokens
-- KV Cache memory
-
-## Async Queue API
-
-KVCache-Serve supports asynchronous inference through Redis Queue.
-
-Submit a job:
-
-    curl -X POST "http://localhost:18000/queue/chat" -H "Content-Type: application/json" -d '{"prompt":"Hello, explain KV cache briefly.","model":"local-llm","max_tokens":32}'
-
-Check queue health:
+队列健康检查：
 
     curl http://localhost:18000/queue/health
 
-Check job status:
+提交异步任务：
+
+    curl -X POST "http://localhost:18000/queue/chat" -H "Content-Type: application/json" -d '{"prompt":"Hello, explain KV cache briefly.","model":"local-llm","max_tokens":32}'
+
+查询任务状态：
 
     curl http://localhost:18000/queue/status/{job_id}
 
-Get job result:
+查询任务结果：
 
     curl http://localhost:18000/queue/result/{job_id}
+
+查看 Prometheus 指标：
+
+    curl http://localhost:18000/metrics
+
+Prometheus 查询：
+
+    http://localhost:9090
+
+Grafana Dashboard：
+
+    http://localhost:3001
+
+## 六、Benchmark
+
+运行短 prompt 测试：
+
+    python benchmark/run_benchmark.py --workload benchmark/workloads/short_prompt.json --repeat 2 --concurrency 1 --max-tokens 32
+
+运行中等 prompt 测试：
+
+    python benchmark/run_benchmark.py --workload benchmark/workloads/medium_prompt.json --repeat 2 --concurrency 1 --max-tokens 64
+
+运行长 prompt 测试：
+
+    python benchmark/run_benchmark.py --workload benchmark/workloads/long_prompt.json --repeat 2 --concurrency 1 --max-tokens 64
+
+生成 HTML 报告：
+
+    python benchmark/report_generator.py
+
+打开报告：
+
+    explorer.exe "$(wslpath -w benchmark/results/benchmark_report.html)"
+
+## 七、当前进度
+
+- V0.1 FastAPI 服务骨架：已完成
+- V0.2 本地 Transformers 推理：已完成
+- V0.3 Prefill / Decode 指标统计：已完成
+- V0.4 Inference Backend + KV Cache Runtime：已完成
+- V0.5 Benchmark Runner：已完成
+- V0.6 HTML Benchmark Report：已完成
+- V0.7 Redis Queue + Worker：已完成
+- V0.8 Docker Compose 部署：已完成
+- V0.9 Prometheus + Grafana：已完成
+- V1.0 Grafana Dashboard 自动导入：已完成
+- 后续：Kubernetes 部署、Worker 指标暴露、Queue 指标、KV Cache 策略实验
+
+## 八、项目价值
+
+这个项目覆盖了 AI Infra / LLM Serving / SRE 中常见的多个工程点：
+
+- 大模型推理服务化
+- KV Cache 运行时观测
+- Prefill / Decode 性能分析
+- Redis 异步任务队列
+- Worker 解耦架构
+- Prometheus 指标采集
+- Grafana Dashboard 可视化
+- Docker Compose 一键部署
+- Benchmark 自动化评估
+
+相比单纯复现 KV Cache 算法，这个项目更偏向真实服务系统，适合用于 SRE、DevOps、云原生、AI Infra、LLM Serving 方向的简历和面试展示。
