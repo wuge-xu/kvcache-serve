@@ -51,6 +51,9 @@ services:
     container_name: kvcache-grafana
     ports:
       - "3001:3000"
+    volumes:
+      - ./deploy/compose/grafana/provisioning:/etc/grafana/provisioning
+      - ./deploy/compose/grafana/dashboards:/var/lib/grafana/dashboards
     depends_on:
       - prometheus
     restart: unless-stopped
