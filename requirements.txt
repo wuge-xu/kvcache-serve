@@ -6,3 +6,4 @@ requests
 torch
 transformers
 accelerate
+redis
