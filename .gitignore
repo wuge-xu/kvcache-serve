@@ -35,3 +35,9 @@ models/
 
 # Benchmark generated results
 benchmark/results/
+
+# Keep final benchmark report
+!benchmark/results/
+benchmark/results/*.json
+benchmark/results/*.csv
+!benchmark/results/benchmark_report.html

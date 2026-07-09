@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>KVCache-Serve Benchmark Report</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 32px;
+            background: #f7f8fa;
+            color: #222;
+        }
+        h1 {
+            margin-bottom: 4px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 24px;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            margin-bottom: 24px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        th, td {
+            border-bottom: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+        th {
+            background: #f0f2f5;
+        }
+        code {
+            background: #eee;
+            padding: 2px 5px;
+            border-radius: 4px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+        }
+        canvas {
+            width: 100% !important;
+            height: 320px !important;
+        }
+    </style>
+</head>
+<body>
+    <h1>KVCache-Serve Benchmark Report</h1>
+    <div class="subtitle">Generated at 2026-07-09 14:31:45</div>
+
+    <div class="card">
+        <h2>Overview</h2>
+        <p>
+            This report summarizes benchmark results from <code>KVCache-Serve</code>.
+            It compares latency, TTFT, inter-token latency, throughput, and estimated KV cache usage
+            across different workloads.
+        </p>
+    </div>
+
+    <div class="card">
+        <h2>Summary Table</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Workload</th>
+                    <th>Requests</th>
+                    <th>Concurrency</th>
+                    <th>Max Tokens</th>
+                    <th>Avg Latency ms</th>
+                    <th>P95 Latency ms</th>
+                    <th>Avg TTFT ms</th>
+                    <th>Avg ITL ms</th>
+                    <th>Tokens/s</th>
+                    <th>KV Tokens</th>
+                    <th>KV Memory MB</th>
+                    <th>Error Rate</th>
+                </tr>
+            </thead>
+            <tbody>
+                
+        <tr>
+            <td>long_prompt</td>
+            <td>6</td>
+            <td>1</td>
+            <td>64</td>
+            <td>56.055</td>
+            <td>65.72</td>
+            <td>2.3933</td>
+            <td>0.8383</td>
+            <td>1148.0317</td>
+            <td>119.0</td>
+            <td>0.003632</td>
+            <td>0.0</td>
+        </tr>
+        
+
+        <tr>
+            <td>medium_prompt</td>
+            <td>6</td>
+            <td>1</td>
+            <td>64</td>
+            <td>57.7267</td>
+            <td>61.49</td>
+            <td>2.4033</td>
+            <td>0.8667</td>
+            <td>1111.2183</td>
+            <td>90.3333</td>
+            <td>0.002757</td>
+            <td>0.0</td>
+        </tr>
+        
+
+        <tr>
+            <td>short_prompt</td>
+            <td>6</td>
+            <td>1</td>
+            <td>32</td>
+            <td>30.13</td>
+            <td>35.54</td>
+            <td>1.7567</td>
+            <td>0.9</td>
+            <td>1071.9817</td>
+            <td>44.3333</td>
+            <td>0.001353</td>
+            <td>0.0</td>
+        </tr>
+        
+
+        <tr>
+            <td>short_prompt</td>
+            <td>6</td>
+            <td>1</td>
+            <td>32</td>
+            <td>30.995</td>
+            <td>34.98</td>
+            <td>1.695</td>
+            <td>0.9217</td>
+            <td>1046.6517</td>
+            <td>44.3333</td>
+            <td>0.001353</td>
+            <td>0.0</td>
+        </tr>
+        
+            </tbody>
+        </table>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Average Latency</h2>
+            <canvas id="latencyChart"></canvas>
+        </div>
+
+        <div class="card">
+            <h2>Average TTFT</h2>
+            <canvas id="ttftChart"></canvas>
+        </div>
+
+        <div class="card">
+            <h2>KV Cache Tokens</h2>
+            <canvas id="kvTokensChart"></canvas>
+        </div>
+
+        <div class="card">
+            <h2>KV Cache Memory</h2>
+            <canvas id="kvMemoryChart"></canvas>
+        </div>
+    </div>
+
+    <script>
+        const workloads = ["long_prompt", "medium_prompt", "short_prompt", "short_prompt"];
+        const latencyValues = [56.055, 57.7267, 30.13, 30.995];
+        const ttftValues = [2.3933, 2.4033, 1.7567, 1.695];
+        const kvTokensValues = [119.0, 90.3333, 44.3333, 44.3333];
+        const memoryValues = [0.003632, 0.002757, 0.001353, 0.001353];
+
+        function makeBarChart(canvasId, label, values) {
+            new Chart(document.getElementById(canvasId), {
+                type: 'bar',
+                data: {
+                    labels: workloads,
+                    datasets: [{
+                        label: label,
+                        data: values
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            display: true
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+
+        makeBarChart('latencyChart', 'Avg Latency ms', latencyValues);
+        makeBarChart('ttftChart', 'Avg TTFT ms', ttftValues);
+        makeBarChart('kvTokensChart', 'Avg KV Cache Tokens', kvTokensValues);
+        makeBarChart('kvMemoryChart', 'Avg KV Cache Memory MB', memoryValues);
+    </script>
+</body>
+</html>
