@@ -7,5 +7,5 @@ async def health_check():
     return {
         "status": "ok",
         "service": "kvcache-serve",
-        "version": "0.1.0"
+        "version": "0.4.0"
     }

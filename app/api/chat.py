@@ -1,10 +1,13 @@
 import asyncio
-import time
+import uuid
 
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
 
-from app.inference.generator import local_generator
+from app.inference.backend import GenerationRequest
+from app.inference.mock_backend import mock_backend
+from app.inference.transformers_backend import transformers_backend
+from app.kvcache.runtime import kv_cache_runtime
 from app.metrics.prometheus import (
     LLM_REQUEST_TOTAL,
     LLM_REQUEST_LATENCY_SECONDS,
@@ -24,103 +27,61 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     prompt: str = Field(..., description="User prompt")
     system_prompt: str | None = Field(default=None, description="Optional system prompt")
-    model: str = Field(default="local-llm", description="Model name: local-llm or mock-llm")
+    model: str = Field(default="local-llm", description="local-llm or mock-llm")
     max_tokens: int = Field(default=64, ge=1, le=512)
 
 
 class ChatResponse(BaseModel):
+    request_id: str
+
     answer: str
     model: str
+    backend: str
+    device: str
+
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+
     latency_ms: float
-    cache_status: str
-    device: str | None = None
+    prefill_ms: float
+    decode_ms: float
+    ttft_ms: float
+    avg_itl_ms: float
+    tokens_per_second: float
 
-    prefill_ms: float = 0.0
-    decode_ms: float = 0.0
-    ttft_ms: float = 0.0
-    avg_itl_ms: float = 0.0
-    tokens_per_second: float = 0.0
-
-    kv_cache_tokens: int = 0
-    kv_cache_memory_bytes: int = 0
-    kv_cache_memory_mb: float = 0.0
-
-
-def estimate_tokens(text: str) -> int:
-    if not text:
-        return 0
-    return max(1, len(text) // 2)
-
-
-async def mock_generate(request: ChatRequest) -> ChatResponse:
-    start_time = time.perf_counter()
-
-    await asyncio.sleep(0.3)
-
-    answer = (
-        "这是 KVCache-Serve 当前的 Mock LLM 回答。"
-        f"你输入的问题是：{request.prompt}。"
-        "当前阶段重点是先打通 API、Metrics 和服务骨架。"
-    )
-
-    prompt_tokens = estimate_tokens(request.prompt)
-    completion_tokens = estimate_tokens(answer)
-    total_tokens = prompt_tokens + completion_tokens
-    latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
-
-    return ChatResponse(
-        answer=answer,
-        model="mock-llm",
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=total_tokens,
-        latency_ms=latency_ms,
-        cache_status="none",
-        device="mock",
-        tokens_per_second=round(completion_tokens / (latency_ms / 1000), 2),
-    )
+    kv_cache_tokens: int
+    kv_cache_memory_bytes: int
+    kv_cache_memory_mb: float
 
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    if not request.prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt cannot be empty")
+
+    request_id = str(uuid.uuid4())
+
     LLM_ACTIVE_REQUESTS.inc()
+    kv_cache_runtime.request_started(request_id)
 
     try:
-        if not request.prompt.strip():
-            raise HTTPException(status_code=400, detail="prompt cannot be empty")
+        generation_request = GenerationRequest(
+            request_id=request_id,
+            prompt=request.prompt,
+            system_prompt=request.system_prompt,
+            max_tokens=request.max_tokens,
+        )
 
         if request.model == "mock-llm":
-            result = await mock_generate(request)
-        else:
-            generation = await asyncio.to_thread(
-                local_generator.generate,
-                request.prompt,
-                request.system_prompt,
-                request.max_tokens,
+            result = await asyncio.to_thread(
+                mock_backend.generate,
+                generation_request,
             )
-
-            result = ChatResponse(
-                answer=generation.answer,
-                model=generation.model,
-                prompt_tokens=generation.prompt_tokens,
-                completion_tokens=generation.completion_tokens,
-                total_tokens=generation.total_tokens,
-                latency_ms=generation.latency_ms,
-                cache_status="full",
-                device=generation.device,
-
-                prefill_ms=generation.prefill_ms,
-                decode_ms=generation.decode_ms,
-                ttft_ms=generation.ttft_ms,
-                avg_itl_ms=generation.avg_itl_ms,
-                tokens_per_second=generation.tokens_per_second,
-
-                kv_cache_tokens=generation.kv_cache_tokens,
-                kv_cache_memory_bytes=generation.kv_cache_memory_bytes,
-                kv_cache_memory_mb=generation.kv_cache_memory_mb,
+        else:
+            result = await asyncio.to_thread(
+                transformers_backend.generate,
+                generation_request,
             )
 
         LLM_TOKENS_GENERATED_TOTAL.inc(result.completion_tokens)
@@ -142,14 +103,40 @@ async def chat(request: ChatRequest):
         LLM_KV_CACHE_TOKENS.set(result.kv_cache_tokens)
         LLM_KV_CACHE_MEMORY_BYTES.set(result.kv_cache_memory_bytes)
 
-        return result
+        kv_cache_runtime.request_finished(request_id)
+
+        return ChatResponse(
+            request_id=result.request_id,
+
+            answer=result.answer,
+            model=result.model,
+            backend=result.backend,
+            device=result.device,
+
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            total_tokens=result.total_tokens,
+
+            latency_ms=result.latency_ms,
+            prefill_ms=result.prefill_ms,
+            decode_ms=result.decode_ms,
+            ttft_ms=result.ttft_ms,
+            avg_itl_ms=result.avg_itl_ms,
+            tokens_per_second=result.tokens_per_second,
+
+            kv_cache_tokens=result.kv_cache_tokens,
+            kv_cache_memory_bytes=result.kv_cache_memory_bytes,
+            kv_cache_memory_mb=result.kv_cache_memory_mb,
+        )
 
     except HTTPException:
         LLM_REQUEST_TOTAL.labels(endpoint="/chat", status="bad_request").inc()
+        kv_cache_runtime.request_failed(request_id, "bad_request")
         raise
 
     except Exception as e:
         LLM_REQUEST_TOTAL.labels(endpoint="/chat", status="error").inc()
+        kv_cache_runtime.request_failed(request_id, str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
