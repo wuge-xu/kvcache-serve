@@ -274,3 +274,51 @@ Grafana Dashboard：
 - Benchmark 自动化评估
 
 相比单纯复现 KV Cache 算法，这个项目更偏向真实服务系统，适合用于 SRE、DevOps、云原生、AI Infra、LLM Serving 方向的简历和面试展示。
+
+## 九、Kubernetes 部署
+
+项目已经支持在本地 K3s / Kubernetes 环境中部署核心推理链路。
+
+Kubernetes 部署组件包括：
+
+- kvcache-redis：Redis 队列与结果存储
+- kvcache-api：FastAPI API 服务
+- kvcache-worker：推理 Worker
+
+部署命令：
+
+    kubectl apply -f deploy/k8s/namespace.yaml
+    kubectl apply -f deploy/k8s/redis.yaml
+    kubectl apply -f deploy/k8s/api.yaml
+    kubectl apply -f deploy/k8s/worker.yaml
+
+查看 Pod 状态：
+
+    kubectl get pods -n kvcache-serve
+
+查看 Service：
+
+    kubectl get svc -n kvcache-serve
+
+本地转发 API 服务：
+
+    kubectl port-forward -n kvcache-serve svc/kvcache-api 18001:18000
+
+测试健康检查：
+
+    curl http://localhost:18001/health
+
+测试异步推理链路：
+
+    curl -X POST "http://localhost:18001/queue/chat" -H "Content-Type: application/json" -d '{"prompt":"Hello, explain KV cache briefly.","model":"local-llm","max_tokens":32}'
+
+说明：
+
+如果使用 K3s，本地 Docker 镜像不会自动被 K3s 看到，需要先将镜像导入 K3s containerd：
+
+    docker save kvcache-serve-api:latest -o /tmp/kvcache-serve-api.tar
+    docker save kvcache-serve-worker:latest -o /tmp/kvcache-serve-worker.tar
+    sudo k3s ctr images import /tmp/kvcache-serve-api.tar
+    sudo k3s ctr images import /tmp/kvcache-serve-worker.tar
+
+当前 Kubernetes 部署已经验证通过，API、Redis、Worker 均可正常运行，异步推理任务可以成功完成并返回 KV Cache 指标。
