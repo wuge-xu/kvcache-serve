@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kvcache-worker
+  namespace: kvcache-serve
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kvcache-worker
+  template:
+    metadata:
+      labels:
+        app: kvcache-worker
+    spec:
+      containers:
+        - name: worker
+          image: kvcache-serve-worker:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "app.worker"]
+          env:
+            - name: REDIS_HOST
+              value: kvcache-redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: KVCACHE_MODEL
+              value: sshleifer/tiny-gpt2
+            - name: MAX_NEW_TOKENS
+              value: "64"
