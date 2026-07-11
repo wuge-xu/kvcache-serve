@@ -322,3 +322,152 @@ Kubernetes 部署组件包括：
     sudo k3s ctr images import /tmp/kvcache-serve-worker.tar
 
 当前 Kubernetes 部署已经验证通过，API、Redis、Worker 均可正常运行，异步推理任务可以成功完成并返回 KV Cache 指标。
+
+## 十、队列功能验收记录
+
+本项目已经完成 Redis Queue + Worker 异步推理链路验证。
+
+### 验收目标
+
+本次验收目标是确认完整链路：
+
+用户提交任务
+  |
+  v
+API Server 写入 Redis Queue
+  |
+  v
+Worker 从 Redis Queue 消费任务
+  |
+  v
+Transformers Backend 执行模型推理
+  |
+  v
+结果写回 Redis
+  |
+  v
+用户通过 job_id 查询结果
+
+### 本次测试环境
+
+- 部署方式：Kubernetes / K3s
+- API 访问方式：kubectl port-forward
+- 本地访问端口：http://localhost:18001
+- 模型：sshleifer/tiny-gpt2
+- 后端：TransformersBackend
+- 队列：Redis Queue
+- Worker：kvcache-worker
+
+### 健康检查结果
+
+API 健康检查成功：
+
+    curl http://localhost:18001/health
+
+返回：
+
+    {"status":"ok","service":"kvcache-serve","version":"0.4.0"}
+
+队列健康检查成功：
+
+    curl http://localhost:18001/queue/health
+
+返回：
+
+    {"redis":"ok","queue_size":0}
+
+### 本次任务 ID
+
+    d7e14308-5ae0-46e6-80c8-153f86074798
+
+### 状态查询结果
+
+任务提交后，第一次查询状态为：
+
+    {
+        "status": "running",
+        "job_id": "d7e14308-5ae0-46e6-80c8-153f86074798",
+        "queue_size": 0
+    }
+
+2 秒后状态变为：
+
+    {
+        "status": "finished",
+        "job_id": "d7e14308-5ae0-46e6-80c8-153f86074798",
+        "queue_size": 0
+    }
+
+说明：
+
+- running 表示 Worker 已经从 Redis Queue 中取走任务并开始推理
+- finished 表示任务已完成，结果已经写回 Redis
+- queue_size 为 0 表示队列中没有积压任务
+
+当前实现中的状态命名为：
+
+- queued：任务已入队
+- running：任务处理中，对应 processing
+- finished：任务完成，对应 completed
+
+由于 Worker 消费速度较快，queued 状态可能一闪而过，实际测试中观察到了 running 到 finished 的完整状态变化。
+
+### 结果查询结果
+
+最终结果可以正常返回：
+
+    {
+        "job_id": "d7e14308-5ae0-46e6-80c8-153f86074798",
+        "status": "finished",
+        "result": {
+            "request_id": "d7e14308-5ae0-46e6-80c8-153f86074798",
+            "model": "sshleifer/tiny-gpt2",
+            "backend": "transformers",
+            "device": "cpu",
+            "prompt_tokens": 13,
+            "completion_tokens": 32,
+            "total_tokens": 45,
+            "latency_ms": 75.9,
+            "prefill_ms": 47.29,
+            "decode_ms": 28.0,
+            "ttft_ms": 47.58,
+            "avg_itl_ms": 0.89,
+            "tokens_per_second": 421.61,
+            "kv_cache_tokens": 44,
+            "kv_cache_memory_bytes": 1408,
+            "kv_cache_memory_mb": 0.001343
+        }
+    }
+
+说明模型推理结果、token 统计、延迟指标和 KV Cache 指标均正常返回。
+
+### 日志验证
+
+API 日志显示请求链路正常：
+
+    GET /health 200 OK
+    GET /queue/health 200 OK
+    POST /queue/chat 200 OK
+    GET /queue/status/{job_id} 200 OK
+    GET /queue/result/{job_id} 200 OK
+
+Worker 日志显示任务被正常消费并完成：
+
+    [Worker] KVCache-Serve inference worker started.
+    [Worker] Waiting for tasks from Redis...
+    [Worker] Received job: d7e14308-5ae0-46e6-80c8-153f86074798, model=local-llm
+    [ModelLoader] Loading model: sshleifer/tiny-gpt2
+    [ModelLoader] Device: cpu
+    [ModelLoader] Model loaded successfully.
+    [Worker] Finished job: d7e14308-5ae0-46e6-80c8-153f86074798
+
+Redis 日志显示 Redis 服务正常启动并接受连接：
+
+    Ready to accept connections tcp
+
+### 验收结论
+
+本次验证确认 Redis Queue + Worker 异步推理链路已经完整跑通：
+
+用户提交任务 -> API 写入 Redis Queue -> Worker 消费任务 -> Transformers Backend 执行模型推理 -> 结果写回 Redis -> 用户通过 job_id 查询结果。
+
