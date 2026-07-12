@@ -11,6 +11,8 @@ QUEUE_NAME = "kvcache:tasks"
 RESULT_PREFIX = "kvcache:result:"
 STATUS_PREFIX = "kvcache:status:"
 
+DEFAULT_MAX_RETRIES = int(os.getenv("QUEUE_MAX_RETRIES", "2"))
+
 
 @dataclass
 class QueueTask:
@@ -20,6 +22,8 @@ class QueueTask:
     model: str
     max_tokens: int
     created_at: float
+    attempts: int = 0
+    max_retries: int = DEFAULT_MAX_RETRIES
 
 
 class RedisQueue:
@@ -52,15 +56,28 @@ class RedisQueue:
             model=model,
             max_tokens=max_tokens,
             created_at=time.time(),
+            attempts=0,
+            max_retries=DEFAULT_MAX_RETRIES,
         )
 
         self.client.set(
             STATUS_PREFIX + job_id,
-            json.dumps({"status": "queued", "job_id": job_id}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "status": "queued",
+                    "job_id": job_id,
+                    "attempts": task.attempts,
+                    "max_retries": task.max_retries,
+                },
+                ensure_ascii=False,
+            ),
             ex=3600,
         )
 
-        self.client.rpush(QUEUE_NAME, json.dumps(asdict(task), ensure_ascii=False))
+        self.client.rpush(
+            QUEUE_NAME,
+            json.dumps(asdict(task), ensure_ascii=False),
+        )
 
         return job_id
 
@@ -73,13 +90,48 @@ class RedisQueue:
         _, payload = item
         data = json.loads(payload)
 
+        # 兼容升级前已经存在于 Redis 中的旧任务。
+        data.setdefault("attempts", 0)
+        data.setdefault("max_retries", DEFAULT_MAX_RETRIES)
+
         return QueueTask(**data)
 
-    def set_running(self, job_id: str):
+    def set_running(self, task: QueueTask):
         self.client.set(
-            STATUS_PREFIX + job_id,
-            json.dumps({"status": "running", "job_id": job_id}, ensure_ascii=False),
+            STATUS_PREFIX + task.job_id,
+            json.dumps(
+                {
+                    "status": "running",
+                    "job_id": task.job_id,
+                    "attempts": task.attempts,
+                    "max_retries": task.max_retries,
+                },
+                ensure_ascii=False,
+            ),
             ex=3600,
+        )
+
+    def requeue(self, task: QueueTask, error: str):
+        task.attempts += 1
+
+        self.client.set(
+            STATUS_PREFIX + task.job_id,
+            json.dumps(
+                {
+                    "status": "retrying",
+                    "job_id": task.job_id,
+                    "attempts": task.attempts,
+                    "max_retries": task.max_retries,
+                    "last_error": error,
+                },
+                ensure_ascii=False,
+            ),
+            ex=3600,
+        )
+
+        self.client.rpush(
+            QUEUE_NAME,
+            json.dumps(asdict(task), ensure_ascii=False),
         )
 
     def set_result(self, job_id: str, result: dict):
@@ -91,17 +143,25 @@ class RedisQueue:
 
         self.client.set(
             STATUS_PREFIX + job_id,
-            json.dumps({"status": "finished", "job_id": job_id}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "status": "finished",
+                    "job_id": job_id,
+                },
+                ensure_ascii=False,
+            ),
             ex=3600,
         )
 
-    def set_error(self, job_id: str, error: str):
+    def set_error(self, task: QueueTask, error: str):
         self.client.set(
-            STATUS_PREFIX + job_id,
+            STATUS_PREFIX + task.job_id,
             json.dumps(
                 {
                     "status": "failed",
-                    "job_id": job_id,
+                    "job_id": task.job_id,
+                    "attempts": task.attempts,
+                    "max_retries": task.max_retries,
                     "error": error,
                 },
                 ensure_ascii=False,

@@ -1,10 +1,9 @@
-import json
 import time
 
 from app.inference.backend import GenerationRequest
 from app.inference.mock_backend import mock_backend
 from app.inference.transformers_backend import transformers_backend
-from app.scheduler.redis_queue import redis_queue
+from app.scheduler.redis_queue import QueueTask, redis_queue
 
 
 def result_to_dict(result):
@@ -29,8 +28,15 @@ def result_to_dict(result):
     }
 
 
-def handle_task(task):
-    redis_queue.set_running(task.job_id)
+def resolve_backend(model_name: str):
+    if model_name == "mock-llm":
+        return mock_backend
+
+    return transformers_backend
+
+
+def process_task(task: QueueTask, queue=redis_queue, backend=None) -> str:
+    queue.set_running(task)
 
     generation_request = GenerationRequest(
         request_id=task.job_id,
@@ -39,12 +45,22 @@ def handle_task(task):
         max_tokens=task.max_tokens,
     )
 
-    if task.model == "mock-llm":
-        result = mock_backend.generate(generation_request)
-    else:
-        result = transformers_backend.generate(generation_request)
+    selected_backend = backend or resolve_backend(task.model)
 
-    redis_queue.set_result(task.job_id, result_to_dict(result))
+    try:
+        result = selected_backend.generate(generation_request)
+        queue.set_result(task.job_id, result_to_dict(result))
+        return "finished"
+
+    except Exception as error:
+        error_message = str(error)
+
+        if task.attempts < task.max_retries:
+            queue.requeue(task, error_message)
+            return "retrying"
+
+        queue.set_error(task, error_message)
+        return "failed"
 
 
 def main():
@@ -57,15 +73,28 @@ def main():
         if task is None:
             continue
 
-        print(f"[Worker] Received job: {task.job_id}, model={task.model}")
+        print(
+            f"[Worker] Received job: {task.job_id}, "
+            f"model={task.model}, "
+            f"attempt={task.attempts}/{task.max_retries}"
+        )
 
-        try:
-            handle_task(task)
+        outcome = process_task(task)
+
+        if outcome == "finished":
             print(f"[Worker] Finished job: {task.job_id}")
 
-        except Exception as e:
-            print(f"[Worker] Failed job: {task.job_id}, error={e}")
-            redis_queue.set_error(task.job_id, str(e))
+        elif outcome == "retrying":
+            print(
+                f"[Worker] Retrying job: {task.job_id}, "
+                f"next_attempt={task.attempts}/{task.max_retries}"
+            )
+
+        else:
+            print(
+                f"[Worker] Permanently failed job: {task.job_id}, "
+                f"attempts={task.attempts}/{task.max_retries}"
+            )
 
         time.sleep(0.1)
 
