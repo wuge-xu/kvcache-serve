@@ -509,3 +509,35 @@ Redis 日志显示 Redis 服务正常启动并接受连接：
     }
 
 Worker 日志可以看到任务被接收、重新入队并最终失败。由此确认 Worker 能捕获推理异常，Redis 能保存简短错误信息，查询接口能够返回失败状态与错误原因。
+
+## 十三、队列运行统计
+
+项目提供队列运行统计接口：
+
+    GET /queue/stats
+
+调用方式：
+
+    curl -s http://localhost:18000/queue/stats | python3 -m json.tool
+
+返回字段：
+
+- queue_size：当前 Redis 队列中等待消费的任务数量
+- jobs_submitted_total：累计提交任务数
+- processing_attempts_total：累计推理执行次数，包含重试执行
+- jobs_completed_total：累计成功任务数
+- jobs_failed_total：累计最终失败任务数
+- retries_total：累计重试次数
+
+示例：
+
+    {
+        "queue_size": 0,
+        "jobs_submitted_total": 2,
+        "processing_attempts_total": 4,
+        "jobs_completed_total": 1,
+        "jobs_failed_total": 1,
+        "retries_total": 2
+    }
+
+统计数据存储在当前 Redis 实例的 `kvcache:stats` Hash 中，用于观察异步任务提交、执行、成功、失败及重试情况。

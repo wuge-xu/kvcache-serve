@@ -79,6 +79,11 @@ async def get_job_result(job_id: str):
     }
 
 
+@router.get("/stats")
+async def queue_stats():
+    return redis_queue.get_stats()
+
+
 @router.get("/health")
 async def queue_health():
     return {

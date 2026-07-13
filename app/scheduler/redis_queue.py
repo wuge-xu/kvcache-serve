@@ -10,6 +10,7 @@ import redis
 QUEUE_NAME = "kvcache:tasks"
 RESULT_PREFIX = "kvcache:result:"
 STATUS_PREFIX = "kvcache:status:"
+STATS_KEY = "kvcache:stats"
 
 DEFAULT_MAX_RETRIES = int(os.getenv("QUEUE_MAX_RETRIES", "2"))
 
@@ -73,6 +74,7 @@ class RedisQueue:
             json.dumps(asdict(task), ensure_ascii=False),
         )
 
+        self._increment_stat("jobs_submitted_total")
         return job_id
 
     def dequeue(self, timeout: int = 5) -> QueueTask | None:
@@ -100,6 +102,8 @@ class RedisQueue:
             },
         )
 
+        self._increment_stat("processing_attempts_total")
+
     def requeue(self, task: QueueTask, error: str):
         task.attempts += 1
         short_error = self._short_error(error)
@@ -120,6 +124,8 @@ class RedisQueue:
             json.dumps(asdict(task), ensure_ascii=False),
         )
 
+        self._increment_stat("retries_total")
+
     def set_result(self, task: QueueTask, result: dict):
         self.client.set(
             RESULT_PREFIX + task.job_id,
@@ -137,6 +143,8 @@ class RedisQueue:
             },
         )
 
+        self._increment_stat("jobs_completed_total")
+
     def set_error(self, task: QueueTask, error: str):
         short_error = self._short_error(error)
 
@@ -150,6 +158,8 @@ class RedisQueue:
                 "error": short_error,
             },
         )
+
+        self._increment_stat("jobs_failed_total")
 
     def get_status(self, job_id: str) -> dict | None:
         raw = self.client.get(STATUS_PREFIX + job_id)
@@ -169,6 +179,30 @@ class RedisQueue:
 
     def queue_size(self) -> int:
         return int(self.client.llen(QUEUE_NAME))
+
+    def get_stats(self) -> dict:
+        raw_stats = self.client.hgetall(STATS_KEY)
+
+        stat_names = (
+            "jobs_submitted_total",
+            "processing_attempts_total",
+            "jobs_completed_total",
+            "jobs_failed_total",
+            "retries_total",
+        )
+
+        stats = {
+            name: int(raw_stats.get(name, 0))
+            for name in stat_names
+        }
+
+        return {
+            "queue_size": self.queue_size(),
+            **stats,
+        }
+
+    def _increment_stat(self, name: str):
+        self.client.hincrby(STATS_KEY, name, 1)
 
     def _save_status(self, job_id: str, data: dict):
         self.client.set(
