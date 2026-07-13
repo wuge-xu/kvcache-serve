@@ -6,6 +6,15 @@ from app.inference.transformers_backend import transformers_backend
 from app.scheduler.redis_queue import QueueTask, redis_queue
 
 
+class ControlledFailureBackend:
+    def generate(self, request):
+        time.sleep(1)
+        raise RuntimeError("simulated inference failure")
+
+
+controlled_failure_backend = ControlledFailureBackend()
+
+
 def result_to_dict(result):
     return {
         "request_id": result.request_id,
@@ -32,11 +41,14 @@ def resolve_backend(model_name: str):
     if model_name == "mock-llm":
         return mock_backend
 
+    if model_name == "fail-test":
+        return controlled_failure_backend
+
     return transformers_backend
 
 
 def process_task(task: QueueTask, queue=redis_queue, backend=None) -> str:
-    queue.set_running(task)
+    queue.set_processing(task)
 
     generation_request = GenerationRequest(
         request_id=task.job_id,
@@ -49,15 +61,15 @@ def process_task(task: QueueTask, queue=redis_queue, backend=None) -> str:
 
     try:
         result = selected_backend.generate(generation_request)
-        queue.set_result(task.job_id, result_to_dict(result))
-        return "finished"
+        queue.set_result(task, result_to_dict(result))
+        return "completed"
 
     except Exception as error:
         error_message = str(error)
 
         if task.attempts < task.max_retries:
             queue.requeue(task, error_message)
-            return "retrying"
+            return "queued"
 
         queue.set_error(task, error_message)
         return "failed"
@@ -81,18 +93,18 @@ def main():
 
         outcome = process_task(task)
 
-        if outcome == "finished":
-            print(f"[Worker] Finished job: {task.job_id}")
+        if outcome == "completed":
+            print(f"[Worker] Completed job: {task.job_id}")
 
-        elif outcome == "retrying":
+        elif outcome == "queued":
             print(
-                f"[Worker] Retrying job: {task.job_id}, "
+                f"[Worker] Requeued job: {task.job_id}, "
                 f"next_attempt={task.attempts}/{task.max_retries}"
             )
 
         else:
             print(
-                f"[Worker] Permanently failed job: {task.job_id}, "
+                f"[Worker] Failed job: {task.job_id}, "
                 f"attempts={task.attempts}/{task.max_retries}"
             )
 

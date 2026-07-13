@@ -11,13 +11,13 @@ class FailingBackend:
 
 class FakeQueue:
     def __init__(self):
-        self.running = []
+        self.processing = []
         self.retried = []
         self.failed = []
         self.results = []
 
-    def set_running(self, task):
-        self.running.append(task.job_id)
+    def set_processing(self, task):
+        self.processing.append(task.job_id)
 
     def requeue(self, task, error):
         task.attempts += 1
@@ -38,10 +38,10 @@ class FakeQueue:
             }
         )
 
-    def set_result(self, job_id, result):
+    def set_result(self, task, result):
         self.results.append(
             {
-                "job_id": job_id,
+                "job_id": task.job_id,
                 "result": result,
             }
         )
@@ -49,10 +49,10 @@ class FakeQueue:
 
 def make_task(attempts):
     return QueueTask(
-        job_id=f"retry-test-{attempts}",
-        prompt="retry test",
+        job_id=f"failure-test-{attempts}",
+        prompt="failure test",
         system_prompt=None,
-        model="local-llm",
+        model="fail-test",
         max_tokens=8,
         created_at=time.time(),
         attempts=attempts,
@@ -60,7 +60,7 @@ def make_task(attempts):
     )
 
 
-def test_first_failure_is_retried():
+def test_first_failure_is_requeued():
     task = make_task(attempts=0)
     queue = FakeQueue()
 
@@ -70,16 +70,16 @@ def test_first_failure_is_retried():
         backend=FailingBackend(),
     )
 
-    assert outcome == "retrying"
+    assert outcome == "queued"
     assert task.attempts == 1
+    assert len(queue.processing) == 1
     assert len(queue.retried) == 1
     assert len(queue.failed) == 0
 
-    print("[PASS] first failure changed to retrying")
-    print(queue.retried[0])
+    print("[PASS] first failure was requeued")
 
 
-def test_final_failure_is_not_retried():
+def test_final_failure_is_saved():
     task = make_task(attempts=2)
     queue = FakeQueue()
 
@@ -90,15 +90,15 @@ def test_final_failure_is_not_retried():
     )
 
     assert outcome == "failed"
-    assert task.attempts == 2
+    assert len(queue.processing) == 1
     assert len(queue.retried) == 0
     assert len(queue.failed) == 1
+    assert queue.failed[0]["error"] == "simulated inference failure"
 
-    print("[PASS] retry limit changed status to failed")
-    print(queue.failed[0])
+    print("[PASS] final failure status and error were saved")
 
 
 if __name__ == "__main__":
-    test_first_failure_is_retried()
-    test_final_failure_is_not_retried()
-    print("[PASS] all retry tests completed")
+    test_first_failure_is_requeued()
+    test_final_failure_is_saved()
+    print("[PASS] all worker failure tests completed")

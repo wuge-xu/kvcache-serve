@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from app.scheduler.redis_queue import redis_queue
 
@@ -51,10 +51,21 @@ async def get_job_result(job_id: str):
     if status is None:
         raise HTTPException(status_code=404, detail="job not found")
 
-    if status.get("status") != "finished":
+    current_status = status.get("status")
+
+    if current_status == "failed":
         return {
             "job_id": job_id,
-            "status": status.get("status"),
+            "status": "failed",
+            "error": status.get("error", "unknown worker error"),
+            "attempts": status.get("attempts", 0),
+            "max_retries": status.get("max_retries", 0),
+        }
+
+    if current_status != "completed":
+        return {
+            "job_id": job_id,
+            "status": current_status,
             "message": "result is not ready",
             "queue_size": redis_queue.queue_size(),
         }
@@ -63,7 +74,7 @@ async def get_job_result(job_id: str):
 
     return {
         "job_id": job_id,
-        "status": "finished",
+        "status": "completed",
         "result": result,
     }
 

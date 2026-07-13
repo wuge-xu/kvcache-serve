@@ -471,3 +471,41 @@ Redis 日志显示 Redis 服务正常启动并接受连接：
 
 用户提交任务 -> API 写入 Redis Queue -> Worker 消费任务 -> Transformers Backend 执行模型推理 -> 结果写回 Redis -> 用户通过 job_id 查询结果。
 
+
+## 十二、任务失败状态验收
+
+队列任务状态已统一为：
+
+- queued：任务已进入 Redis 队列
+- processing：Worker 已取出任务并开始推理
+- completed：模型推理成功，结果已写回 Redis
+- failed：模型推理失败，错误原因已写入 Redis
+
+失败测试使用专门的测试模型名称：
+
+    fail-test
+
+提交失败测试任务：
+
+    BASE_URL=http://localhost:18000
+
+    FAIL_JOB=$(curl -s -X POST "$BASE_URL/queue/chat" -H "Content-Type: application/json" -d '{"prompt":"simulate worker failure","model":"fail-test","max_tokens":8}' | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+
+查询状态：
+
+    curl -s "$BASE_URL/queue/status/$FAIL_JOB" | python3 -m json.tool
+
+查询失败结果：
+
+    curl -s "$BASE_URL/queue/result/$FAIL_JOB" | python3 -m json.tool
+
+最终返回内容包含：
+
+    {
+        "status": "failed",
+        "error": "simulated inference failure",
+        "attempts": 2,
+        "max_retries": 2
+    }
+
+Worker 日志可以看到任务被接收、重新入队并最终失败。由此确认 Worker 能捕获推理异常，Redis 能保存简短错误信息，查询接口能够返回失败状态与错误原因。
