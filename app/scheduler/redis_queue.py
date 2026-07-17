@@ -2,15 +2,17 @@ import json
 import os
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 import redis
 
 
 QUEUE_NAME = "kvcache:tasks"
+PROCESSING_QUEUE_NAME = "kvcache:processing"
+PROCESSING_CLAIMS_KEY = "kvcache:processing:claims"
+
 RESULT_PREFIX = "kvcache:result:"
 STATUS_PREFIX = "kvcache:status:"
-STATS_KEY = "kvcache:stats"
 
 DEFAULT_MAX_RETRIES = int(os.getenv("QUEUE_MAX_RETRIES", "2"))
 
@@ -25,6 +27,23 @@ class QueueTask:
     created_at: float
     attempts: int = 0
     max_retries: int = DEFAULT_MAX_RETRIES
+    recoveries: int = 0
+
+    processing_payload: str | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    claimed_at: float | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    worker_id: str | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 class RedisQueue:
@@ -66,30 +85,58 @@ class RedisQueue:
                 "job_id": job_id,
                 "attempts": task.attempts,
                 "max_retries": task.max_retries,
+                "recoveries": task.recoveries,
             },
         )
 
         self.client.rpush(
             QUEUE_NAME,
-            json.dumps(asdict(task), ensure_ascii=False),
+            self._serialize_task(task),
         )
 
-        self._increment_stat("jobs_submitted_total")
         return job_id
 
-    def dequeue(self, timeout: int = 5) -> QueueTask | None:
-        item = self.client.blpop(QUEUE_NAME, timeout=timeout)
+    def dequeue(
+        self,
+        timeout: int = 5,
+        worker_id: str | None = None,
+    ) -> QueueTask | None:
+        payload = self.client.execute_command(
+            "BLMOVE",
+            QUEUE_NAME,
+            PROCESSING_QUEUE_NAME,
+            "LEFT",
+            "RIGHT",
+            timeout,
+        )
 
-        if item is None:
+        if payload is None:
             return None
 
-        _, payload = item
         data = json.loads(payload)
-
         data.setdefault("attempts", 0)
         data.setdefault("max_retries", DEFAULT_MAX_RETRIES)
+        data.setdefault("recoveries", 0)
 
-        return QueueTask(**data)
+        task = QueueTask(**data)
+        task.processing_payload = payload
+        task.claimed_at = time.time()
+        task.worker_id = worker_id or os.getenv("HOSTNAME", "worker")
+
+        claim = {
+            "job_id": task.job_id,
+            "claimed_at": task.claimed_at,
+            "worker_id": task.worker_id,
+            "payload": payload,
+        }
+
+        self.client.hset(
+            PROCESSING_CLAIMS_KEY,
+            task.job_id,
+            json.dumps(claim, ensure_ascii=False),
+        )
+
+        return task
 
     def set_processing(self, task: QueueTask):
         self._save_status(
@@ -99,67 +146,89 @@ class RedisQueue:
                 "job_id": task.job_id,
                 "attempts": task.attempts,
                 "max_retries": task.max_retries,
+                "recoveries": task.recoveries,
+                "claimed_at": task.claimed_at,
+                "worker_id": task.worker_id,
             },
         )
-
-        self._increment_stat("processing_attempts_total")
 
     def requeue(self, task: QueueTask, error: str):
         task.attempts += 1
-        short_error = self._short_error(error)
 
-        self._save_status(
-            task.job_id,
-            {
-                "status": "queued",
-                "job_id": task.job_id,
-                "attempts": task.attempts,
-                "max_retries": task.max_retries,
-                "last_error": short_error,
-            },
+        status_data = {
+            "status": "queued",
+            "job_id": task.job_id,
+            "attempts": task.attempts,
+            "max_retries": task.max_retries,
+            "recoveries": task.recoveries,
+            "last_error": self._short_error(error),
+        }
+
+        pipe = self.client.pipeline(transaction=True)
+
+        pipe.set(
+            STATUS_PREFIX + task.job_id,
+            json.dumps(status_data, ensure_ascii=False),
+            ex=3600,
         )
 
-        self.client.rpush(
+        pipe.rpush(
             QUEUE_NAME,
-            json.dumps(asdict(task), ensure_ascii=False),
+            self._serialize_task(task),
         )
 
-        self._increment_stat("retries_total")
+        self._queue_ack(pipe, task)
+        pipe.execute()
+        self._clear_claim(task)
 
     def set_result(self, task: QueueTask, result: dict):
-        self.client.set(
+        status_data = {
+            "status": "completed",
+            "job_id": task.job_id,
+            "attempts": task.attempts,
+            "max_retries": task.max_retries,
+            "recoveries": task.recoveries,
+        }
+
+        pipe = self.client.pipeline(transaction=True)
+
+        pipe.set(
             RESULT_PREFIX + task.job_id,
             json.dumps(result, ensure_ascii=False),
             ex=3600,
         )
 
-        self._save_status(
-            task.job_id,
-            {
-                "status": "completed",
-                "job_id": task.job_id,
-                "attempts": task.attempts,
-                "max_retries": task.max_retries,
-            },
+        pipe.set(
+            STATUS_PREFIX + task.job_id,
+            json.dumps(status_data, ensure_ascii=False),
+            ex=3600,
         )
 
-        self._increment_stat("jobs_completed_total")
+        self._queue_ack(pipe, task)
+        pipe.execute()
+        self._clear_claim(task)
 
     def set_error(self, task: QueueTask, error: str):
-        short_error = self._short_error(error)
+        status_data = {
+            "status": "failed",
+            "job_id": task.job_id,
+            "attempts": task.attempts,
+            "max_retries": task.max_retries,
+            "recoveries": task.recoveries,
+            "error": self._short_error(error),
+        }
 
-        self._save_status(
-            task.job_id,
-            {
-                "status": "failed",
-                "job_id": task.job_id,
-                "attempts": task.attempts,
-                "max_retries": task.max_retries,
-                "error": short_error,
-            },
+        pipe = self.client.pipeline(transaction=True)
+
+        pipe.set(
+            STATUS_PREFIX + task.job_id,
+            json.dumps(status_data, ensure_ascii=False),
+            ex=3600,
         )
 
-        self._increment_stat("jobs_failed_total")
+        self._queue_ack(pipe, task)
+        pipe.execute()
+        self._clear_claim(task)
 
     def get_status(self, job_id: str) -> dict | None:
         raw = self.client.get(STATUS_PREFIX + job_id)
@@ -180,29 +249,45 @@ class RedisQueue:
     def queue_size(self) -> int:
         return int(self.client.llen(QUEUE_NAME))
 
-    def get_stats(self) -> dict:
-        raw_stats = self.client.hgetall(STATS_KEY)
+    def processing_size(self) -> int:
+        return int(self.client.llen(PROCESSING_QUEUE_NAME))
 
-        stat_names = (
-            "jobs_submitted_total",
-            "processing_attempts_total",
-            "jobs_completed_total",
-            "jobs_failed_total",
-            "retries_total",
-        )
+    def get_processing_claims(self) -> dict[str, dict]:
+        raw_claims = self.client.hgetall(PROCESSING_CLAIMS_KEY)
+        claims: dict[str, dict] = {}
 
-        stats = {
-            name: int(raw_stats.get(name, 0))
-            for name in stat_names
-        }
+        for job_id, raw_claim in raw_claims.items():
+            try:
+                claims[job_id] = json.loads(raw_claim)
+            except json.JSONDecodeError:
+                continue
 
-        return {
-            "queue_size": self.queue_size(),
-            **stats,
-        }
+        return claims
 
-    def _increment_stat(self, name: str):
-        self.client.hincrby(STATS_KEY, name, 1)
+    @staticmethod
+    def _serialize_task(task: QueueTask) -> str:
+        data = asdict(task)
+        data.pop("processing_payload", None)
+        data.pop("claimed_at", None)
+        data.pop("worker_id", None)
+        return json.dumps(data, ensure_ascii=False)
+
+    @staticmethod
+    def _queue_ack(pipe, task: QueueTask):
+        if task.processing_payload is not None:
+            pipe.lrem(
+                PROCESSING_QUEUE_NAME,
+                1,
+                task.processing_payload,
+            )
+
+        pipe.hdel(PROCESSING_CLAIMS_KEY, task.job_id)
+
+    @staticmethod
+    def _clear_claim(task: QueueTask):
+        task.processing_payload = None
+        task.claimed_at = None
+        task.worker_id = None
 
     def _save_status(self, job_id: str, data: dict):
         self.client.set(

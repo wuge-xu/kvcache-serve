@@ -1,3 +1,5 @@
+import os
+import socket
 import time
 
 from app.inference.backend import GenerationRequest
@@ -76,11 +78,20 @@ def process_task(task: QueueTask, queue=redis_queue, backend=None) -> str:
 
 
 def main():
+    worker_id = (
+        os.getenv("WORKER_ID")
+        or f"{socket.gethostname()}-{os.getpid()}"
+    )
+
     print("[Worker] KVCache-Serve inference worker started.")
+    print(f"[Worker] Worker id: {worker_id}")
     print("[Worker] Waiting for tasks from Redis...")
 
     while True:
-        task = redis_queue.dequeue(timeout=5)
+        task = redis_queue.dequeue(
+            timeout=5,
+            worker_id=worker_id,
+        )
 
         if task is None:
             continue

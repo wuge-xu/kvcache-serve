@@ -597,3 +597,51 @@ Worker 使用 Redis `BLMOVE` 命令领取任务：
 本阶段解决的是任务领取后立即从 Redis 完全消失的问题。
 
 当前阶段尚未实现处理中任务的超时扫描和自动恢复。如果 Worker 在推理过程中直接崩溃，任务会保留在 `kvcache:processing` 中，后续可以通过超时回收机制重新放回待处理队列。
+
+
+## 可靠消费机制：Processing 队列与 ACK
+
+早期版本使用 Redis `BLPOP` 领取任务。任务一旦被 Worker 取出，就会立即离开待处理队列。如果 Worker 在推理过程中突然退出，任务可能既不在队列中，也没有最终结果。
+
+当前版本增加以下 Redis 数据结构：
+
+- `kvcache:tasks`：等待 Worker 消费的任务；
+- `kvcache:processing`：已经领取但尚未确认完成的任务；
+- `kvcache:processing:claims`：保存任务领取时间和 Worker 标识。
+
+Worker 使用 Redis `BLMOVE` 原子地将任务从待处理队列移动到处理中队列：
+
+    BLMOVE kvcache:tasks kvcache:processing LEFT RIGHT
+
+领取任务后记录：
+
+- job_id；
+- claimed_at；
+- worker_id；
+- 原始任务内容。
+
+正常处理流程：
+
+    queued
+      -> processing
+      -> completed
+      -> ACK 删除 processing 记录
+
+任务最终失败时：
+
+    processing
+      -> failed
+      -> 保存错误信息
+      -> ACK 删除 processing 记录
+
+需要重试时，任务重新进入待处理队列，并删除旧的 processing 和 claim 记录。
+
+正常任务测试结果：
+
+- Worker 停止时：pending=1，processing=0，claims=0；
+- Worker 领取时：pending=0，processing=1，claims=1；
+- 推理完成后：pending=0，processing=0，claims=0；
+- 最终任务状态为 completed；
+- 查询接口能够返回完整推理结果。
+
+该机制避免任务在被 Worker 领取后立即从 Redis 中完全消失，也为后续的 processing 超时扫描和故障恢复提供了基础。
