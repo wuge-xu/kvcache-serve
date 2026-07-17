@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kvcache-config
+  namespace: kvcache-serve
+data:
+  REDIS_HOST: kvcache-redis
+  REDIS_PORT: "6379"
+
+  KVCACHE_MODEL: sshleifer/tiny-gpt2
+  MAX_NEW_TOKENS: "64"
+
+  QUEUE_MAX_RETRIES: "2"
+  PROCESSING_TIMEOUT_SECONDS: "30"
+  REAPER_INTERVAL_SECONDS: "5"
+  MAX_RECOVERIES: "2"

@@ -909,3 +909,71 @@ Grafana 默认监听：
 Dashboard 配置文件：
 
     deploy/compose/grafana/dashboards/kvcache-queue-reliability.json
+
+
+## Kubernetes 可靠队列与 Reaper 部署
+
+项目提供完整的 Kubernetes / K3s 部署清单：
+
+    deploy/k8s/
+
+主要资源包括：
+
+- `kvcache-config` ConfigMap；
+- Redis Deployment 与 ClusterIP Service；
+- Redis PVC 与 AOF 持久化；
+- FastAPI Deployment 与 Service；
+- Worker Deployment；
+- Reaper Deployment；
+- Kustomize 统一部署入口。
+
+部署命令：
+
+    kubectl apply -k deploy/k8s
+
+当前应用镜像：
+
+    kvcache-serve:local
+
+在本地 K3s 环境中，需要先将 Docker 镜像导入 K3s
+containerd：
+
+    docker build -t kvcache-serve:local .
+
+    docker save kvcache-serve:local       | sudo k3s ctr images import -
+
+可靠队列使用以下正式参数：
+
+    QUEUE_MAX_RETRIES=2
+    PROCESSING_TIMEOUT_SECONDS=30
+    REAPER_INTERVAL_SECONDS=5
+    MAX_RECOVERIES=2
+
+Worker 使用 Redis 的 processing 队列和 claim 记录保存已领取但尚未确认的任务。只有推理完成并成功保存结果后，Worker 才会从 processing 队列中确认并删除任务。
+
+Worker Pod 异常退出后，任务仍保留在 processing 队列。Reaper 定期扫描超时 claim，将失联任务重新放回待处理队列，由新 Worker Pod 继续处理。
+
+Redis 使用以下持久化配置：
+
+    appendonly yes
+    appendfsync everysec
+
+数据目录挂载到：
+
+    /data
+
+对应 PVC：
+
+    kvcache-redis-data
+
+故障演练已验证：
+
+1. Worker 领取任务后被强制删除；
+2. processing 任务和 claim 未丢失；
+3. Reaper 检测到超时任务并重新入队；
+4. 新 Worker Pod 接管并完成任务；
+5. pending、processing 和 claim 最终归零；
+6. Redis Pod 删除并重建后，排队任务仍然存在；
+7. Worker 恢复后持久化任务正常完成。
+
+当前可靠队列提供 at-least-once 处理语义。在 Worker 失联、任务超时或网络异常时，任务可能被重复执行。因此，结果保存需要使用 `job_id` 实现幂等写入，并将 processing 超时时间设置为大于正常任务最大执行时间。

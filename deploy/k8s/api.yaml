@@ -3,42 +3,97 @@ kind: Deployment
 metadata:
   name: kvcache-api
   namespace: kvcache-serve
+  labels:
+    app: kvcache-api
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: kvcache-api
+
   template:
     metadata:
       labels:
         app: kvcache-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "18000"
+
     spec:
       containers:
         - name: api
-          image: kvcache-serve-api:latest
-          imagePullPolicy: IfNotPresent
+          image: kvcache-serve:local
+          imagePullPolicy: Never
+
+          command:
+            - uvicorn
+            - app.main:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "18000"
+
+          envFrom:
+            - configMapRef:
+                name: kvcache-config
+
           ports:
-            - containerPort: 18000
-          env:
-            - name: REDIS_HOST
-              value: kvcache-redis
-            - name: REDIS_PORT
-              value: "6379"
-            - name: KVCACHE_MODEL
-              value: sshleifer/tiny-gpt2
-            - name: MAX_NEW_TOKENS
-              value: "64"
+            - name: http
+              containerPort: 18000
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 4
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: kvcache-api
   namespace: kvcache-serve
+  labels:
+    app: kvcache-api
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics
+    prometheus.io/port: "18000"
 spec:
   selector:
     app: kvcache-api
+
   ports:
     - name: http
       port: 18000
-      targetPort: 18000
+      targetPort: http
+
   type: ClusterIP
