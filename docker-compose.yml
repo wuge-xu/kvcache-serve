@@ -35,6 +35,22 @@ services:
       - redis
     restart: unless-stopped
 
+  reaper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kvcache-reaper
+    command: ["python", "-m", "app.reaper"]
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PROCESSING_TIMEOUT_SECONDS=${PROCESSING_TIMEOUT_SECONDS:-30}
+      - REAPER_INTERVAL_SECONDS=${REAPER_INTERVAL_SECONDS:-5}
+      - MAX_RECOVERIES=${MAX_RECOVERIES:-2}
+    depends_on:
+      - redis
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:latest
     container_name: kvcache-prometheus

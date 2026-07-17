@@ -737,3 +737,50 @@ processing 超时任务达到恢复上限时，Reaper 使用 Redis Lua 脚本原
 这样 processing 任务第一次超时就会进入死信队列，便于进行手动故障验证。
 
 死信队列使最终失败任务得到保留，便于后续人工排查、重新投递和故障分析，而不是静默丢失。
+
+
+## Reaper Docker Compose 常驻服务
+
+Processing 超时回收器已经作为正式服务加入 `docker-compose.yml`。
+
+现在执行：
+
+    docker compose up -d
+
+即可同时启动：
+
+- API；
+- Worker；
+- Reaper；
+- Redis；
+- Prometheus；
+- Grafana。
+
+Reaper 的默认配置为：
+
+    PROCESSING_TIMEOUT_SECONDS=30
+    REAPER_INTERVAL_SECONDS=5
+    MAX_RECOVERIES=2
+
+配置支持通过宿主机环境变量覆盖。例如：
+
+    PROCESSING_TIMEOUT_SECONDS=5     REAPER_INTERVAL_SECONDS=1     docker compose up -d --force-recreate reaper
+
+Reaper 使用：
+
+    restart: unless-stopped
+
+因此 Reaper 进程或容器异常退出后，Docker 会自动将其重新启动。
+
+故障测试验证：
+
+1. 提交异步推理任务；
+2. Worker 将任务移动到 processing 队列；
+3. 强制停止 Worker；
+4. Reaper 保持运行；
+5. 超过阈值后，Reaper 将任务重新放回待处理队列；
+6. 重启 Worker；
+7. 任务最终完成并被 ACK；
+8. pending、processing 和 claims 均恢复为 0。
+
+Reaper 现在不再依赖手动执行 `docker compose run`，能够作为推理服务可靠性链路中的常驻后台组件运行。
