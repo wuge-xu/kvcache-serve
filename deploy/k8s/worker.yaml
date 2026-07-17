@@ -6,7 +6,7 @@ metadata:
   labels:
     app: kvcache-worker
 spec:
-  replicas: 1
+  replicas: 3
 
   selector:
     matchLabels:
@@ -29,6 +29,12 @@ spec:
             - python
             - -m
             - app.worker
+
+          env:
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
 
           envFrom:
             - configMapRef:

@@ -110,6 +110,9 @@ def test_k8s_reliable_queue_manifests():
             "app.worker",
             "name: kvcache-config",
             "terminationGracePeriodSeconds: 10",
+            "replicas: 3",
+            "name: WORKER_ID",
+            "fieldPath: metadata.name",
         ),
         "worker.yaml",
     )

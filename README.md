@@ -977,3 +977,72 @@ Redis 使用以下持久化配置：
 7. Worker 恢复后持久化任务正常完成。
 
 当前可靠队列提供 at-least-once 处理语义。在 Worker 失联、任务超时或网络异常时，任务可能被重复执行。因此，结果保存需要使用 `job_id` 实现幂等写入，并将 processing 超时时间设置为大于正常任务最大执行时间。
+
+
+## Kubernetes 多 Worker 与故障转移
+
+Kubernetes 部署默认运行 3 个推理 Worker：
+
+    replicas: 3
+
+Worker 通过 Kubernetes Downward API 获取当前 Pod 名，并将其作为唯一 Worker 身份：
+
+    env:
+      - name: WORKER_ID
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+
+任务从 Redis 待处理队列原子移动到 processing 队列后，会记录以下归属信息：
+
+- `worker_id`：领取任务的 Worker；
+- `claimed_by`：任务当前归属的 Worker；
+- `claimed_at`：任务被领取的时间；
+- `processing_started_at`：任务正式开始处理的时间；
+- `last_worker_id`：任务最后一次被哪个 Worker 处理；
+- `completed_at`：任务完成时间。
+
+任务完成后，结果中也会保留 `worker_id` 与 `claimed_by`，用于分析多 Worker 的任务分布。
+
+多副本验证结果：
+
+    submitted=30
+    completed=30
+    failed=0
+    workers_used=3
+
+三个 Worker 的任务分布：
+
+    Worker A: 10
+    Worker B: 10
+    Worker C: 10
+
+故障演练步骤：
+
+1. 启动 3 个 Worker Pod；
+2. 批量提交 30 个异步推理任务；
+3. 在任务 processing 期间强制删除一个 Worker Pod；
+4. Deployment 自动创建新的 Worker Pod；
+5. Reaper 检测被删除 Worker 遗留的超时 claim；
+6. Reaper 将任务重新放回待处理队列；
+7. 其他 Worker 重新领取并完成任务。
+
+故障演练结果：
+
+    jobs_submitted_total=30
+    processing_attempts_total=31
+    jobs_completed_total=30
+    jobs_failed_total=0
+    recoveries_total=1
+    dead_lettered_total=0
+
+最终队列状态：
+
+    pending=0
+    processing=0
+    claims=0
+    dead_letter=0
+
+30 个任务产生 31 次 processing，说明被删除 Worker 遗留的一个任务经过 Reaper 恢复后被重新执行。所有任务最终完成，未进入死信队列。
+
+当前队列提供 at-least-once 处理语义。Worker 宕机时，系统优先保证任务不丢失，因此极端情况下同一任务可能被重复处理。结果写入应以 `job_id` 作为幂等键。

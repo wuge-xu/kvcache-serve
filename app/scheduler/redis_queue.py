@@ -81,6 +81,11 @@ class QueueTask:
         repr=False,
         compare=False,
     )
+    processing_started_at: float | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     worker_id: str | None = field(
         default=None,
         repr=False,
@@ -171,6 +176,7 @@ class RedisQueue:
             "job_id": task.job_id,
             "claimed_at": task.claimed_at,
             "worker_id": task.worker_id,
+            "claimed_by": task.worker_id,
             "payload": payload,
         }
 
@@ -183,6 +189,29 @@ class RedisQueue:
         return task
 
     def set_processing(self, task: QueueTask):
+        task.processing_started_at = time.time()
+
+        if task.processing_payload is not None:
+            claim = {
+                "job_id": task.job_id,
+                "claimed_at": task.claimed_at,
+                "processing_started_at": (
+                    task.processing_started_at
+                ),
+                "worker_id": task.worker_id,
+                "claimed_by": task.worker_id,
+                "payload": task.processing_payload,
+            }
+
+            self.client.hset(
+                PROCESSING_CLAIMS_KEY,
+                task.job_id,
+                json.dumps(
+                    claim,
+                    ensure_ascii=False,
+                ),
+            )
+
         self._save_status(
             task.job_id,
             {
@@ -192,7 +221,11 @@ class RedisQueue:
                 "max_retries": task.max_retries,
                 "recoveries": task.recoveries,
                 "claimed_at": task.claimed_at,
+                "processing_started_at": (
+                    task.processing_started_at
+                ),
                 "worker_id": task.worker_id,
+                "claimed_by": task.worker_id,
             },
         )
 
@@ -221,6 +254,8 @@ class RedisQueue:
             "max_retries": task.max_retries,
             "recoveries": task.recoveries,
             "last_error": self._short_error(error),
+            "last_worker_id": task.worker_id,
+            "requeued_at": time.time(),
         }
 
         pipe = self.client.pipeline(transaction=True)
@@ -242,25 +277,40 @@ class RedisQueue:
         self._increment_stat("retries_total")
 
     def set_result(self, task: QueueTask, result: dict):
+        completed_at = time.time()
+        result_data = dict(result)
+
+        result_data["worker_id"] = task.worker_id
+        result_data["claimed_by"] = task.worker_id
+        result_data["completed_at"] = completed_at
+
         status_data = {
             "status": "completed",
             "job_id": task.job_id,
             "attempts": task.attempts,
             "max_retries": task.max_retries,
             "recoveries": task.recoveries,
+            "last_worker_id": task.worker_id,
+            "completed_at": completed_at,
         }
 
         pipe = self.client.pipeline(transaction=True)
 
         pipe.set(
             RESULT_PREFIX + task.job_id,
-            json.dumps(result, ensure_ascii=False),
+            json.dumps(
+                result_data,
+                ensure_ascii=False,
+            ),
             ex=3600,
         )
 
         pipe.set(
             STATUS_PREFIX + task.job_id,
-            json.dumps(status_data, ensure_ascii=False),
+            json.dumps(
+                status_data,
+                ensure_ascii=False,
+            ),
             ex=3600,
         )
 
@@ -279,6 +329,8 @@ class RedisQueue:
             "max_retries": task.max_retries,
             "recoveries": task.recoveries,
             "error": short_error,
+            "last_worker_id": task.worker_id,
+            "failed_at": time.time(),
             "dead_letter": True,
             "dead_letter_reason": "inference retry limit exceeded",
         }
@@ -380,6 +432,10 @@ class RedisQueue:
                 claim = json.loads(raw_claim)
                 claimed_at = float(claim["claimed_at"])
                 payload = str(claim["payload"])
+                claimed_by = (
+                    claim.get("claimed_by")
+                    or claim.get("worker_id")
+                )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 result["skipped"] += 1
                 continue
@@ -461,6 +517,7 @@ class RedisQueue:
                 "recoveries": task.recoveries,
                 "max_recoveries": max_recoveries,
                 "last_error": "worker processing timeout",
+                "last_worker_id": claimed_by,
                 "recovered_at": now,
             }
 
@@ -789,6 +846,7 @@ class RedisQueue:
         data = asdict(task)
         data.pop("processing_payload", None)
         data.pop("claimed_at", None)
+        data.pop("processing_started_at", None)
         data.pop("worker_id", None)
         return json.dumps(data, ensure_ascii=False)
 
@@ -807,6 +865,7 @@ class RedisQueue:
     def _clear_claim(task: QueueTask):
         task.processing_payload = None
         task.claimed_at = None
+        task.processing_started_at = None
         task.worker_id = None
 
     def _save_status(self, job_id: str, data: dict):
