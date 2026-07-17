@@ -851,3 +851,61 @@ Prometheus 默认每 5 秒抓取一次：
     curl -G http://localhost:9090/api/v1/query       --data-urlencode       'query=kvcache_queue_jobs_submitted_total'
 
 若 Redis 指标读取失败，`kvcache_queue_metrics_up` 会变为 0，并安全停止输出本次队列指标，避免 `/metrics` 接口整体失败。
+
+
+## Grafana 队列可靠性 Dashboard
+
+项目提供自动加载的队列可靠性 Dashboard：
+
+    KVCache-Serve Queue Reliability
+
+Dashboard UID：
+
+    kvcache-queue-reliability
+
+访问地址：
+
+    http://localhost:3001/d/kvcache-queue-reliability/kvcache-serve-queue-reliability
+
+Dashboard 通过 Grafana file provisioning 自动加载，无需在网页中手动创建面板。
+
+顶部状态面板包括：
+
+- Queue Metrics Up；
+- Pending Jobs；
+- Processing Jobs；
+- Dead Letter Jobs；
+- Submitted / Completed / Failed Total；
+- Retries、Recoveries 和 Dead-Lettered Total；
+- Processing Attempts；
+- Success Ratio。
+
+时间序列面板包括：
+
+- Pending、Processing 和 Dead Letter 队列深度；
+- Submitted、Completed、Failed、Retried、Recovered 和 Dead-Lettered 速率；
+- Queue Wait P50 / P95；
+- Worker Inference Duration P50 / P95。
+
+延迟面板使用 Prometheus Histogram 和 `histogram_quantile` 计算：
+
+    histogram_quantile(
+      0.95,
+      sum by (le) (
+        rate(kvcache_worker_job_wait_seconds_bucket[5m])
+      )
+    )
+
+Dashboard 默认刷新周期为 5 秒，默认显示最近 30 分钟数据。
+
+启动完整环境：
+
+    docker compose up -d
+
+Grafana 默认监听：
+
+    http://localhost:3001
+
+Dashboard 配置文件：
+
+    deploy/compose/grafana/dashboards/kvcache-queue-reliability.json
