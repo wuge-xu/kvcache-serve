@@ -10,6 +10,7 @@ import redis
 QUEUE_NAME = "kvcache:tasks"
 PROCESSING_QUEUE_NAME = "kvcache:processing"
 PROCESSING_CLAIMS_KEY = "kvcache:processing:claims"
+DEAD_LETTER_QUEUE_NAME = "kvcache:dead_letter"
 
 RESULT_PREFIX = "kvcache:result:"
 STATUS_PREFIX = "kvcache:status:"
@@ -17,6 +18,9 @@ STATUS_PREFIX = "kvcache:status:"
 DEFAULT_MAX_RETRIES = int(os.getenv("QUEUE_MAX_RETRIES", "2"))
 DEFAULT_PROCESSING_TIMEOUT_SECONDS = float(
     os.getenv("PROCESSING_TIMEOUT_SECONDS", "30")
+)
+DEFAULT_MAX_RECOVERIES = int(
+    os.getenv("MAX_RECOVERIES", "2")
 )
 
 
@@ -212,13 +216,28 @@ class RedisQueue:
         self._clear_claim(task)
 
     def set_error(self, task: QueueTask, error: str):
+        short_error = self._short_error(error)
+
         status_data = {
             "status": "failed",
             "job_id": task.job_id,
             "attempts": task.attempts,
             "max_retries": task.max_retries,
             "recoveries": task.recoveries,
-            "error": self._short_error(error),
+            "error": short_error,
+            "dead_letter": True,
+            "dead_letter_reason": "inference retry limit exceeded",
+        }
+
+        dead_letter_record = {
+            "job_id": task.job_id,
+            "reason": "inference retry limit exceeded",
+            "error": short_error,
+            "attempts": task.attempts,
+            "max_retries": task.max_retries,
+            "recoveries": task.recoveries,
+            "failed_at": time.time(),
+            "task": json.loads(self._serialize_task(task)),
         }
 
         pipe = self.client.pipeline(transaction=True)
@@ -227,6 +246,11 @@ class RedisQueue:
             STATUS_PREFIX + task.job_id,
             json.dumps(status_data, ensure_ascii=False),
             ex=3600,
+        )
+
+        pipe.rpush(
+            DEAD_LETTER_QUEUE_NAME,
+            json.dumps(dead_letter_record, ensure_ascii=False),
         )
 
         self._queue_ack(pipe, task)
@@ -270,11 +294,17 @@ class RedisQueue:
     def recover_stale_tasks(
         self,
         timeout_seconds: float | None = None,
+        max_recoveries: int | None = None,
     ) -> dict[str, int]:
         timeout_seconds = (
             timeout_seconds
             if timeout_seconds is not None
             else DEFAULT_PROCESSING_TIMEOUT_SECONDS
+        )
+        max_recoveries = (
+            max_recoveries
+            if max_recoveries is not None
+            else DEFAULT_MAX_RECOVERIES
         )
 
         now = time.time()
@@ -284,6 +314,7 @@ class RedisQueue:
             "scanned": len(raw_claims),
             "stale": 0,
             "requeued": 0,
+            "dead_lettered": 0,
             "skipped": 0,
         }
 
@@ -313,19 +344,66 @@ class RedisQueue:
                 task = QueueTask(**task_data)
                 task.recoveries += 1
                 new_payload = self._serialize_task(task)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                result["skipped"] += 1
+                continue
+
+            if task.recoveries > max_recoveries:
+                error_message = (
+                    "processing timeout recovery limit exceeded"
+                )
 
                 status_data = {
-                    "status": "queued",
+                    "status": "failed",
                     "job_id": task.job_id,
                     "attempts": task.attempts,
                     "max_retries": task.max_retries,
                     "recoveries": task.recoveries,
-                    "last_error": "worker processing timeout",
-                    "recovered_at": now,
+                    "max_recoveries": max_recoveries,
+                    "error": error_message,
+                    "dead_letter": True,
+                    "dead_letter_reason": error_message,
                 }
-            except (TypeError, ValueError, json.JSONDecodeError):
-                result["skipped"] += 1
+
+                dead_letter_record = {
+                    "job_id": task.job_id,
+                    "reason": error_message,
+                    "error": "worker processing timeout",
+                    "attempts": task.attempts,
+                    "max_retries": task.max_retries,
+                    "recoveries": task.recoveries,
+                    "max_recoveries": max_recoveries,
+                    "failed_at": now,
+                    "task": json.loads(new_payload),
+                }
+
+                dead_lettered = (
+                    self._dead_letter_claim_atomically(
+                        job_id=job_id,
+                        expected_claim=raw_claim,
+                        old_payload=payload,
+                        dead_letter_record=dead_letter_record,
+                        status_data=status_data,
+                    )
+                )
+
+                if dead_lettered:
+                    result["dead_lettered"] += 1
+                else:
+                    result["skipped"] += 1
+
                 continue
+
+            status_data = {
+                "status": "queued",
+                "job_id": task.job_id,
+                "attempts": task.attempts,
+                "max_retries": task.max_retries,
+                "recoveries": task.recoveries,
+                "max_recoveries": max_recoveries,
+                "last_error": "worker processing timeout",
+                "recovered_at": now,
+            }
 
             recovered = self._recover_claim_atomically(
                 job_id=job_id,
@@ -401,6 +479,83 @@ class RedisQueue:
         )
 
         return int(recovered) == 1
+
+    def _dead_letter_claim_atomically(
+        self,
+        job_id: str,
+        expected_claim: str,
+        old_payload: str,
+        dead_letter_record: dict,
+        status_data: dict,
+    ) -> bool:
+        script = """
+        local current_claim = redis.call(
+            'HGET',
+            KEYS[2],
+            ARGV[1]
+        )
+
+        if not current_claim or current_claim ~= ARGV[2] then
+            return 0
+        end
+
+        local removed = redis.call(
+            'LREM',
+            KEYS[1],
+            1,
+            ARGV[3]
+        )
+
+        if removed == 0 then
+            redis.call('HDEL', KEYS[2], ARGV[1])
+            return 0
+        end
+
+        redis.call(
+            'RPUSH',
+            KEYS[3],
+            ARGV[4]
+        )
+
+        redis.call('HDEL', KEYS[2], ARGV[1])
+
+        redis.call(
+            'SET',
+            KEYS[4],
+            ARGV[5],
+            'EX',
+            3600
+        )
+
+        return 1
+        """
+
+        moved = self.client.eval(
+            script,
+            4,
+            PROCESSING_QUEUE_NAME,
+            PROCESSING_CLAIMS_KEY,
+            DEAD_LETTER_QUEUE_NAME,
+            STATUS_PREFIX + job_id,
+            job_id,
+            expected_claim,
+            old_payload,
+            json.dumps(
+                dead_letter_record,
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                status_data,
+                ensure_ascii=False,
+            ),
+        )
+
+        return int(moved) == 1
+
+    def dead_letter_size(self) -> int:
+        return int(
+            self.client.llen(DEAD_LETTER_QUEUE_NAME)
+        )
 
     @staticmethod
     def _serialize_task(task: QueueTask) -> str:

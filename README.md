@@ -690,3 +690,50 @@ Lua 脚本用于避免 Worker 正常完成任务与 Reaper 同时回收任务时
 注意：不要使用 `docker compose kill worker` 进行测试，因为通过 `docker compose run worker` 启动的 Reaper 也可能被识别为 worker 服务并一起停止。应使用 `docker kill kvcache-worker` 精确停止正式 Worker 容器。
 
 该机制解决了 Worker 领取任务后发生进程崩溃，导致任务长期滞留在 processing 队列的问题。
+
+
+## 死信队列
+
+项目使用 Redis List `kvcache:dead_letter` 保存无法继续正常处理的任务。
+
+任务进入死信队列的情况包括：
+
+1. 推理持续异常并达到最大重试次数；
+2. Worker 多次崩溃，processing 超时恢复次数超过 `MAX_RECOVERIES`。
+
+死信记录包含：
+
+- job_id；
+- 原始任务内容；
+- 最终失败原因；
+- attempts 和 max_retries；
+- recoveries 和 max_recoveries；
+- failed_at。
+
+processing 超时任务达到恢复上限时，Reaper 使用 Redis Lua 脚本原子执行：
+
+1. 验证 claim 没有发生变化；
+2. 从 processing 队列删除任务；
+3. 将任务写入 dead-letter 队列；
+4. 删除 claim；
+5. 将任务状态更新为 failed。
+
+默认配置：
+
+    MAX_RECOVERIES=2
+
+查看死信队列长度：
+
+    docker compose exec -T redis       redis-cli LLEN kvcache:dead_letter
+
+查看死信任务：
+
+    docker compose exec -T redis       redis-cli LRANGE kvcache:dead_letter 0 -1
+
+测试时可设置：
+
+    MAX_RECOVERIES=0
+
+这样 processing 任务第一次超时就会进入死信队列，便于进行手动故障验证。
+
+死信队列使最终失败任务得到保留，便于后续人工排查、重新投递和故障分析，而不是静默丢失。
