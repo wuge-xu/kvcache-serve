@@ -1,7 +1,18 @@
 from fastapi import APIRouter, Response
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    generate_latest,
+)
+
+from app.metrics.queue_prometheus import (
+    register_queue_metrics,
+)
+
 
 router = APIRouter()
+
+register_queue_metrics()
+
 
 @router.get("/metrics")
 async def metrics():

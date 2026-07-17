@@ -784,3 +784,70 @@ Reaper 使用：
 8. pending、processing 和 claims 均恢复为 0。
 
 Reaper 现在不再依赖手动执行 `docker compose run`，能够作为推理服务可靠性链路中的常驻后台组件运行。
+
+
+## Worker 与队列 Prometheus 指标
+
+异步任务的运行统计统一保存在 Redis 中，由 API 的 `/metrics` 接口转换为 Prometheus 指标。
+
+采用 Redis 作为统计存储的原因是：
+
+- Worker、API 和 Reaper 是不同进程；
+- Worker 重启后累计计数不能清零；
+- 多 Worker 场景下需要统一汇总；
+- Prometheus 只需抓取 API 一个目标。
+
+当前提供的队列状态指标：
+
+    kvcache_queue_metrics_up
+    kvcache_queue_pending_jobs
+    kvcache_queue_processing_jobs
+    kvcache_queue_dead_letter_jobs
+    kvcache_worker_jobs_in_progress
+
+累计任务指标：
+
+    kvcache_queue_jobs_submitted_total
+    kvcache_worker_processing_attempts_total
+    kvcache_queue_jobs_completed_total
+    kvcache_queue_jobs_failed_total
+    kvcache_queue_jobs_retried_total
+    kvcache_queue_jobs_recovered_total
+    kvcache_queue_jobs_dead_lettered_total
+
+延迟直方图：
+
+    kvcache_worker_job_wait_seconds
+    kvcache_worker_inference_duration_seconds
+
+其中：
+
+- `job_wait_seconds` 表示任务进入队列到 Worker 开始处理的等待时间；
+- `inference_duration_seconds` 表示 Worker 执行一次推理尝试的耗时；
+- 每次重试都会单独记录一次处理尝试和推理耗时；
+- Reaper 成功恢复超时任务时会增加 recovered 计数；
+- 最终失败任务进入 DLQ 时会增加 failed 和 dead-lettered 计数。
+
+查看原始指标：
+
+    curl http://localhost:18000/metrics
+
+查看 Redis 统计快照：
+
+    curl http://localhost:18000/queue/stats
+
+Prometheus 默认每 5 秒抓取一次：
+
+    job_name: kvcache-api
+    target: api:18000
+    metrics_path: /metrics
+
+验证 Prometheus Target：
+
+    curl http://localhost:9090/api/v1/targets
+
+查询提交任务总数：
+
+    curl -G http://localhost:9090/api/v1/query       --data-urlencode       'query=kvcache_queue_jobs_submitted_total'
+
+若 Redis 指标读取失败，`kvcache_queue_metrics_up` 会变为 0，并安全停止输出本次队列指标，避免 `/metrics` 接口整体失败。

@@ -60,6 +60,7 @@ def process_task(task: QueueTask, queue=redis_queue, backend=None) -> str:
     )
 
     selected_backend = backend or resolve_backend(task.model)
+    inference_started_at = time.perf_counter()
 
     try:
         result = selected_backend.generate(generation_request)
@@ -75,6 +76,19 @@ def process_task(task: QueueTask, queue=redis_queue, backend=None) -> str:
 
         queue.set_error(task, error_message)
         return "failed"
+
+    finally:
+        recorder = getattr(
+            queue,
+            "record_inference_duration",
+            None,
+        )
+
+        if callable(recorder):
+            recorder(
+                time.perf_counter()
+                - inference_started_at
+            )
 
 
 def main():

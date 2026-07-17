@@ -12,6 +12,41 @@ PROCESSING_QUEUE_NAME = "kvcache:processing"
 PROCESSING_CLAIMS_KEY = "kvcache:processing:claims"
 DEAD_LETTER_QUEUE_NAME = "kvcache:dead_letter"
 
+QUEUE_STATS_KEY = "kvcache:queue:stats"
+QUEUE_WAIT_HISTOGRAM_KEY = "kvcache:queue:wait_histogram"
+INFERENCE_DURATION_HISTOGRAM_KEY = (
+    "kvcache:worker:inference_duration_histogram"
+)
+
+QUEUE_WAIT_BUCKETS = (
+    0.01,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+)
+
+INFERENCE_DURATION_BUCKETS = (
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+)
+
 RESULT_PREFIX = "kvcache:result:"
 STATUS_PREFIX = "kvcache:status:"
 
@@ -101,6 +136,8 @@ class RedisQueue:
             self._serialize_task(task),
         )
 
+        self._increment_stat("jobs_submitted_total")
+
         return job_id
 
     def dequeue(
@@ -159,8 +196,23 @@ class RedisQueue:
             },
         )
 
+        self._increment_stat("processing_attempts_total")
+
+        if task.created_at > 0:
+            wait_seconds = max(
+                0.0,
+                time.time() - task.created_at,
+            )
+
+            self._observe_histogram(
+                QUEUE_WAIT_HISTOGRAM_KEY,
+                QUEUE_WAIT_BUCKETS,
+                wait_seconds,
+            )
+
     def requeue(self, task: QueueTask, error: str):
         task.attempts += 1
+        task.created_at = time.time()
 
         status_data = {
             "status": "queued",
@@ -187,6 +239,7 @@ class RedisQueue:
         self._queue_ack(pipe, task)
         pipe.execute()
         self._clear_claim(task)
+        self._increment_stat("retries_total")
 
     def set_result(self, task: QueueTask, result: dict):
         status_data = {
@@ -214,6 +267,7 @@ class RedisQueue:
         self._queue_ack(pipe, task)
         pipe.execute()
         self._clear_claim(task)
+        self._increment_stat("jobs_completed_total")
 
     def set_error(self, task: QueueTask, error: str):
         short_error = self._short_error(error)
@@ -256,6 +310,9 @@ class RedisQueue:
         self._queue_ack(pipe, task)
         pipe.execute()
         self._clear_claim(task)
+
+        self._increment_stat("jobs_failed_total")
+        self._increment_stat("dead_lettered_total")
 
     def get_status(self, job_id: str) -> dict | None:
         raw = self.client.get(STATUS_PREFIX + job_id)
@@ -389,6 +446,8 @@ class RedisQueue:
 
                 if dead_lettered:
                     result["dead_lettered"] += 1
+                    self._increment_stat("jobs_failed_total")
+                    self._increment_stat("dead_lettered_total")
                 else:
                     result["skipped"] += 1
 
@@ -415,6 +474,7 @@ class RedisQueue:
 
             if recovered:
                 result["requeued"] += 1
+                self._increment_stat("recoveries_total")
             else:
                 result["skipped"] += 1
 
@@ -556,6 +616,173 @@ class RedisQueue:
         return int(
             self.client.llen(DEAD_LETTER_QUEUE_NAME)
         )
+
+    def get_stats(self) -> dict[str, int]:
+        raw_stats = self.client.hgetall(QUEUE_STATS_KEY)
+
+        return {
+            "queue_size": self.queue_size(),
+            "processing_size": self.processing_size(),
+            "dead_letter_size": self.dead_letter_size(),
+            "jobs_submitted_total": self._stat_value(
+                raw_stats,
+                "jobs_submitted_total",
+            ),
+            "processing_attempts_total": self._stat_value(
+                raw_stats,
+                "processing_attempts_total",
+            ),
+            "jobs_completed_total": self._stat_value(
+                raw_stats,
+                "jobs_completed_total",
+            ),
+            "jobs_failed_total": self._stat_value(
+                raw_stats,
+                "jobs_failed_total",
+            ),
+            "retries_total": self._stat_value(
+                raw_stats,
+                "retries_total",
+            ),
+            "recoveries_total": self._stat_value(
+                raw_stats,
+                "recoveries_total",
+            ),
+            "dead_lettered_total": self._stat_value(
+                raw_stats,
+                "dead_lettered_total",
+            ),
+        }
+
+    def get_metrics_snapshot(self) -> dict:
+        stats = self.get_stats()
+
+        stats["queue_wait_histogram"] = (
+            self._histogram_snapshot(
+                QUEUE_WAIT_HISTOGRAM_KEY,
+                QUEUE_WAIT_BUCKETS,
+            )
+        )
+
+        stats["inference_duration_histogram"] = (
+            self._histogram_snapshot(
+                INFERENCE_DURATION_HISTOGRAM_KEY,
+                INFERENCE_DURATION_BUCKETS,
+            )
+        )
+
+        return stats
+
+    def record_inference_duration(
+        self,
+        duration_seconds: float,
+    ):
+        self._observe_histogram(
+            INFERENCE_DURATION_HISTOGRAM_KEY,
+            INFERENCE_DURATION_BUCKETS,
+            max(0.0, float(duration_seconds)),
+        )
+
+    def _increment_stat(
+        self,
+        field: str,
+        amount: int = 1,
+    ) -> int:
+        increment = getattr(self.client, "hincrby", None)
+
+        if not callable(increment):
+            return 0
+
+        return int(
+            increment(
+                QUEUE_STATS_KEY,
+                field,
+                amount,
+            )
+        )
+
+    def _observe_histogram(
+        self,
+        key: str,
+        buckets: tuple[float, ...],
+        value: float,
+    ):
+        pipeline_factory = getattr(
+            self.client,
+            "pipeline",
+            None,
+        )
+
+        if not callable(pipeline_factory):
+            return
+
+        pipe = pipeline_factory(transaction=True)
+
+        if not hasattr(pipe, "hincrbyfloat"):
+            return
+
+        pipe.hincrby(key, "count", 1)
+        pipe.hincrbyfloat(key, "sum", value)
+
+        for bucket in buckets:
+            if value <= bucket:
+                pipe.hincrby(
+                    key,
+                    self._bucket_field(bucket),
+                    1,
+                )
+
+        pipe.execute()
+
+    def _histogram_snapshot(
+        self,
+        key: str,
+        buckets: tuple[float, ...],
+    ) -> dict:
+        raw = self.client.hgetall(key)
+
+        count = self._stat_value(raw, "count")
+        total = float(raw.get("sum", 0.0))
+
+        bucket_values = []
+
+        for bucket in buckets:
+            bucket_values.append(
+                {
+                    "le": str(bucket),
+                    "count": self._stat_value(
+                        raw,
+                        self._bucket_field(bucket),
+                    ),
+                }
+            )
+
+        bucket_values.append(
+            {
+                "le": "+Inf",
+                "count": count,
+            }
+        )
+
+        return {
+            "count": count,
+            "sum": total,
+            "buckets": bucket_values,
+        }
+
+    @staticmethod
+    def _bucket_field(bucket: float) -> str:
+        return f"le:{bucket}"
+
+    @staticmethod
+    def _stat_value(
+        raw_stats: dict,
+        field: str,
+    ) -> int:
+        try:
+            return int(raw_stats.get(field, 0))
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _serialize_task(task: QueueTask) -> str:
