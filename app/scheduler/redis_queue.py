@@ -15,6 +15,9 @@ RESULT_PREFIX = "kvcache:result:"
 STATUS_PREFIX = "kvcache:status:"
 
 DEFAULT_MAX_RETRIES = int(os.getenv("QUEUE_MAX_RETRIES", "2"))
+DEFAULT_PROCESSING_TIMEOUT_SECONDS = float(
+    os.getenv("PROCESSING_TIMEOUT_SECONDS", "30")
+)
 
 
 @dataclass
@@ -263,6 +266,141 @@ class RedisQueue:
                 continue
 
         return claims
+
+    def recover_stale_tasks(
+        self,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, int]:
+        timeout_seconds = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else DEFAULT_PROCESSING_TIMEOUT_SECONDS
+        )
+
+        now = time.time()
+        raw_claims = self.client.hgetall(PROCESSING_CLAIMS_KEY)
+
+        result = {
+            "scanned": len(raw_claims),
+            "stale": 0,
+            "requeued": 0,
+            "skipped": 0,
+        }
+
+        for job_id, raw_claim in raw_claims.items():
+            try:
+                claim = json.loads(raw_claim)
+                claimed_at = float(claim["claimed_at"])
+                payload = str(claim["payload"])
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                result["skipped"] += 1
+                continue
+
+            if now - claimed_at < timeout_seconds:
+                continue
+
+            result["stale"] += 1
+
+            try:
+                task_data = json.loads(payload)
+                task_data.setdefault("attempts", 0)
+                task_data.setdefault(
+                    "max_retries",
+                    DEFAULT_MAX_RETRIES,
+                )
+                task_data.setdefault("recoveries", 0)
+
+                task = QueueTask(**task_data)
+                task.recoveries += 1
+                new_payload = self._serialize_task(task)
+
+                status_data = {
+                    "status": "queued",
+                    "job_id": task.job_id,
+                    "attempts": task.attempts,
+                    "max_retries": task.max_retries,
+                    "recoveries": task.recoveries,
+                    "last_error": "worker processing timeout",
+                    "recovered_at": now,
+                }
+            except (TypeError, ValueError, json.JSONDecodeError):
+                result["skipped"] += 1
+                continue
+
+            recovered = self._recover_claim_atomically(
+                job_id=job_id,
+                expected_claim=raw_claim,
+                old_payload=payload,
+                new_payload=new_payload,
+                status_data=status_data,
+            )
+
+            if recovered:
+                result["requeued"] += 1
+            else:
+                result["skipped"] += 1
+
+        return result
+
+    def _recover_claim_atomically(
+        self,
+        job_id: str,
+        expected_claim: str,
+        old_payload: str,
+        new_payload: str,
+        status_data: dict,
+    ) -> bool:
+        script = """
+        local current_claim = redis.call(
+            'HGET',
+            KEYS[2],
+            ARGV[1]
+        )
+
+        if not current_claim or current_claim ~= ARGV[2] then
+            return 0
+        end
+
+        local removed = redis.call(
+            'LREM',
+            KEYS[1],
+            1,
+            ARGV[3]
+        )
+
+        if removed == 0 then
+            redis.call('HDEL', KEYS[2], ARGV[1])
+            return 0
+        end
+
+        redis.call('RPUSH', KEYS[3], ARGV[4])
+        redis.call('HDEL', KEYS[2], ARGV[1])
+        redis.call(
+            'SET',
+            KEYS[4],
+            ARGV[5],
+            'EX',
+            3600
+        )
+
+        return 1
+        """
+
+        recovered = self.client.eval(
+            script,
+            4,
+            PROCESSING_QUEUE_NAME,
+            PROCESSING_CLAIMS_KEY,
+            QUEUE_NAME,
+            STATUS_PREFIX + job_id,
+            job_id,
+            expected_claim,
+            old_payload,
+            new_payload,
+            json.dumps(status_data, ensure_ascii=False),
+        )
+
+        return int(recovered) == 1
 
     @staticmethod
     def _serialize_task(task: QueueTask) -> str:

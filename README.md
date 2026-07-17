@@ -645,3 +645,48 @@ Worker 使用 Redis `BLMOVE` 原子地将任务从待处理队列移动到处理
 - 查询接口能够返回完整推理结果。
 
 该机制避免任务在被 Worker 领取后立即从 Redis 中完全消失，也为后续的 processing 超时扫描和故障恢复提供了基础。
+
+
+## Processing 超时扫描与故障恢复
+
+任务被 Worker 原子领取后，会保存在 `kvcache:processing` 中，同时在 `kvcache:processing:claims` 中保存领取信息：
+
+- job_id；
+- claimed_at；
+- worker_id；
+- 原始任务内容。
+
+独立 Reaper 进程按照固定周期扫描 claims。当当前时间与 `claimed_at` 的差值超过 `PROCESSING_TIMEOUT_SECONDS` 时，任务会被判断为超时任务。
+
+Reaper 通过 Redis Lua 脚本原子执行：
+
+1. 确认 claim 仍然是扫描时看到的记录；
+2. 从 `kvcache:processing` 删除旧任务；
+3. 将任务重新写回 `kvcache:tasks`；
+4. 删除旧 claim；
+5. 将任务状态改回 `queued`；
+6. 将 `recoveries` 加一；
+7. 保存 `worker processing timeout` 错误原因。
+
+Lua 脚本用于避免 Worker 正常完成任务与 Reaper 同时回收任务时发生重复入队。
+
+启动 Reaper：
+
+    docker compose run -d       --name kvcache-reaper       -e PROCESSING_TIMEOUT_SECONDS=30       -e REAPER_INTERVAL_SECONDS=5       worker       python -m app.reaper
+
+手动故障测试流程：
+
+    提交任务
+      -> Worker 领取任务
+      -> pending=0，processing=1，claims=1
+      -> docker kill kvcache-worker
+      -> 任务继续保留在 processing 队列
+      -> Reaper 检测任务超时
+      -> pending=1，processing=0，claims=0
+      -> recoveries=1
+      -> 重新启动 Worker
+      -> 任务最终 completed
+
+注意：不要使用 `docker compose kill worker` 进行测试，因为通过 `docker compose run worker` 启动的 Reaper 也可能被识别为 worker 服务并一起停止。应使用 `docker kill kvcache-worker` 精确停止正式 Worker 容器。
+
+该机制解决了 Worker 领取任务后发生进程崩溃，导致任务长期滞留在 processing 队列的问题。
