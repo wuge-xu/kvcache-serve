@@ -5,6 +5,7 @@ import time
 from app.inference.backend import GenerationRequest
 from app.inference.mock_backend import mock_backend
 from app.inference.transformers_backend import transformers_backend
+from app.kvcache.registry import kv_cache_policy_registry
 from app.scheduler.redis_queue import QueueTask, redis_queue
 
 
@@ -36,6 +37,31 @@ def result_to_dict(result):
         "kv_cache_tokens": result.kv_cache_tokens,
         "kv_cache_memory_bytes": result.kv_cache_memory_bytes,
         "kv_cache_memory_mb": result.kv_cache_memory_mb,
+        "kv_policy": getattr(
+            result,
+            "kv_policy",
+            "noop",
+        ),
+        "kv_policy_applied_count": getattr(
+            result,
+            "kv_policy_applied_count",
+            0,
+        ),
+        "kv_policy_tokens_before": getattr(
+            result,
+            "kv_policy_tokens_before",
+            0,
+        ),
+        "kv_policy_tokens_after": getattr(
+            result,
+            "kv_policy_tokens_after",
+            0,
+        ),
+        "kv_policy_evicted_tokens": getattr(
+            result,
+            "kv_policy_evicted_tokens",
+            0,
+        ),
     }
 
 
@@ -52,17 +78,24 @@ def resolve_backend(model_name: str):
 def process_task(task: QueueTask, queue=redis_queue, backend=None) -> str:
     queue.set_processing(task)
 
-    generation_request = GenerationRequest(
-        request_id=task.job_id,
-        prompt=task.prompt,
-        system_prompt=task.system_prompt,
-        max_tokens=task.max_tokens,
-    )
-
     selected_backend = backend or resolve_backend(task.model)
     inference_started_at = time.perf_counter()
 
     try:
+        policy = kv_cache_policy_registry.create(
+            task.kv_policy,
+            task.kv_policy_config,
+        )
+
+        generation_request = GenerationRequest(
+            request_id=task.job_id,
+            prompt=task.prompt,
+            system_prompt=task.system_prompt,
+            max_tokens=task.max_tokens,
+            kv_policy=policy.name,
+            kv_policy_config=policy.config,
+        )
+
         result = selected_backend.generate(generation_request)
         queue.set_result(task, result_to_dict(result))
         return "completed"

@@ -51,6 +51,12 @@ class MockBackend(InferenceBackend):
             kv_cache_tokens=0,
             kv_cache_memory_bytes=0,
             kv_cache_memory_mb=0.0,
+
+            kv_policy=request.kv_policy,
+            kv_policy_applied_count=0,
+            kv_policy_tokens_before=0,
+            kv_policy_tokens_after=0,
+            kv_policy_evicted_tokens=0,
         )
 
 

@@ -24,6 +24,7 @@ class KVCacheRuntime:
         self.finished_requests = 0
         self.error_requests = 0
         self.last_state: KVCacheState | None = None
+        self.last_policy_event: dict | None = None
         self.events = deque(maxlen=100)
 
     def request_started(self, request_id: str):
@@ -68,6 +69,24 @@ class KVCacheRuntime:
                 "timestamp": time.time(),
             })
 
+    def policy_applied(self, result):
+        event = {
+            "event_type": "policy_applied",
+            "request_id": result.request_id,
+            "policy_name": result.policy_name,
+            "stage": result.stage,
+            "decode_step": result.decode_step,
+            "tokens_before": result.tokens_before,
+            "tokens_after": result.tokens_after,
+            "evicted_tokens": result.evicted_tokens,
+            "metadata": dict(result.metadata),
+            "timestamp": time.time(),
+        }
+
+        with self._lock:
+            self.last_policy_event = event
+            self.events.append(event)
+
     def get_status(self) -> dict:
         with self._lock:
             return {
@@ -81,6 +100,7 @@ class KVCacheRuntime:
                 "last_kv_cache_state": (
                     self.last_state.to_dict() if self.last_state else None
                 ),
+                "last_policy_event": self.last_policy_event,
                 "recent_events": list(self.events)[-20:],
             }
 

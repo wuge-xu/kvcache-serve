@@ -24,3 +24,9 @@ class GenerationResult:
     kv_cache_tokens: int
     kv_cache_memory_bytes: int
     kv_cache_memory_mb: float
+
+    kv_policy: str = "noop"
+    kv_policy_applied_count: int = 0
+    kv_policy_tokens_before: int = 0
+    kv_policy_tokens_after: int = 0
+    kv_policy_evicted_tokens: int = 0

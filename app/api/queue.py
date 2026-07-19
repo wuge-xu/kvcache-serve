@@ -1,6 +1,9 @@
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.kvcache.registry import kv_cache_policy_registry
 from app.scheduler.redis_queue import redis_queue
 
 
@@ -12,6 +15,14 @@ class QueueChatRequest(BaseModel):
     system_prompt: str | None = None
     model: str = "local-llm"
     max_tokens: int = Field(default=64, ge=1, le=512)
+    kv_policy: str = Field(
+        default="noop",
+        description="KV Cache policy name",
+    )
+    kv_policy_config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="KV Cache policy configuration",
+    )
 
 
 @router.post("/chat")
@@ -19,16 +30,31 @@ async def enqueue_chat(request: QueueChatRequest):
     if not request.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt cannot be empty")
 
+    try:
+        policy = kv_cache_policy_registry.create(
+            request.kv_policy,
+            request.kv_policy_config,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
     job_id = redis_queue.enqueue(
         prompt=request.prompt,
         system_prompt=request.system_prompt,
         model=request.model,
         max_tokens=request.max_tokens,
+        kv_policy=policy.name,
+        kv_policy_config=policy.config,
     )
 
     return {
         "job_id": job_id,
         "status": "queued",
+        "kv_policy": policy.name,
+        "kv_policy_config": policy.config,
         "queue_size": redis_queue.queue_size(),
     }
 

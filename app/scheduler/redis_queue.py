@@ -71,6 +71,11 @@ class QueueTask:
     max_retries: int = DEFAULT_MAX_RETRIES
     recoveries: int = 0
 
+    kv_policy: str = "noop"
+    kv_policy_config: dict = field(
+        default_factory=dict,
+    )
+
     processing_payload: str | None = field(
         default=None,
         repr=False,
@@ -113,6 +118,8 @@ class RedisQueue:
         system_prompt: str | None,
         model: str,
         max_tokens: int,
+        kv_policy: str = "noop",
+        kv_policy_config: dict | None = None,
     ) -> str:
         job_id = str(uuid.uuid4())
 
@@ -123,6 +130,10 @@ class RedisQueue:
             model=model,
             max_tokens=max_tokens,
             created_at=time.time(),
+            kv_policy=kv_policy,
+            kv_policy_config=dict(
+                kv_policy_config or {}
+            ),
         )
 
         self._save_status(
@@ -133,6 +144,8 @@ class RedisQueue:
                 "attempts": task.attempts,
                 "max_retries": task.max_retries,
                 "recoveries": task.recoveries,
+                "kv_policy": task.kv_policy,
+                "kv_policy_config": task.kv_policy_config,
             },
         )
 
@@ -226,6 +239,8 @@ class RedisQueue:
                 ),
                 "worker_id": task.worker_id,
                 "claimed_by": task.worker_id,
+                "kv_policy": task.kv_policy,
+                "kv_policy_config": task.kv_policy_config,
             },
         )
 
@@ -292,6 +307,8 @@ class RedisQueue:
             "recoveries": task.recoveries,
             "last_worker_id": task.worker_id,
             "completed_at": completed_at,
+            "kv_policy": task.kv_policy,
+            "kv_policy_config": task.kv_policy_config,
         }
 
         pipe = self.client.pipeline(transaction=True)

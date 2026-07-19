@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from typing import Any
 
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
@@ -7,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from app.inference.backend import GenerationRequest
 from app.inference.mock_backend import mock_backend
 from app.inference.transformers_backend import transformers_backend
+from app.kvcache.registry import kv_cache_policy_registry
 from app.kvcache.runtime import kv_cache_runtime
 from app.metrics.prometheus import (
     LLM_REQUEST_TOTAL,
@@ -29,6 +31,11 @@ class ChatRequest(BaseModel):
     system_prompt: str | None = Field(default=None, description="Optional system prompt")
     model: str = Field(default="local-llm", description="local-llm or mock-llm")
     max_tokens: int = Field(default=64, ge=1, le=512)
+    kv_policy: str = Field(default="noop", description="KV Cache policy name")
+    kv_policy_config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="KV Cache policy configuration",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -54,11 +61,28 @@ class ChatResponse(BaseModel):
     kv_cache_memory_bytes: int
     kv_cache_memory_mb: float
 
+    kv_policy: str
+    kv_policy_applied_count: int
+    kv_policy_tokens_before: int
+    kv_policy_tokens_after: int
+    kv_policy_evicted_tokens: int
+
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     if not request.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt cannot be empty")
+
+    try:
+        policy = kv_cache_policy_registry.create(
+            request.kv_policy,
+            request.kv_policy_config,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
 
     request_id = str(uuid.uuid4())
 
@@ -71,6 +95,8 @@ async def chat(request: ChatRequest):
             prompt=request.prompt,
             system_prompt=request.system_prompt,
             max_tokens=request.max_tokens,
+            kv_policy=policy.name,
+            kv_policy_config=policy.config,
         )
 
         if request.model == "mock-llm":
@@ -127,6 +153,12 @@ async def chat(request: ChatRequest):
             kv_cache_tokens=result.kv_cache_tokens,
             kv_cache_memory_bytes=result.kv_cache_memory_bytes,
             kv_cache_memory_mb=result.kv_cache_memory_mb,
+
+            kv_policy=result.kv_policy,
+            kv_policy_applied_count=result.kv_policy_applied_count,
+            kv_policy_tokens_before=result.kv_policy_tokens_before,
+            kv_policy_tokens_after=result.kv_policy_tokens_after,
+            kv_policy_evicted_tokens=result.kv_policy_evicted_tokens,
         )
 
     except HTTPException:
